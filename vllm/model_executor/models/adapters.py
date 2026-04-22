@@ -288,15 +288,37 @@ def as_seq_cls_model(cls: _T) -> _T:
             vllm_config: "VllmConfig",
             prefix: str = "",
         ) -> "Pooler":
-            text_config = vllm_config.model_config.hf_config.get_text_config()
+            hf_config = vllm_config.model_config.hf_config
+            text_config = hf_config.get_text_config()
             model_config = vllm_config.model_config
-            quant_config = vllm_config.quant_config
+
+            # Check if score weights are derived online from LM head
+            # (same condition as load_weights branch)
+            tokens = getattr(
+                hf_config,
+                "classifier_from_token",
+                getattr(text_config, "classifier_from_token", None),
+            )
+            method = getattr(
+                hf_config,
+                "method",
+                getattr(text_config, "method", None),
+            )
+
+            # Online conversion: no score weights in checkpoint, don't
+            # quantize (small output_dim breaks FP8/Marlin tile alignment).
+            # Checkpoint-based: respect the model's quant_config.
+            quant_config = (
+                None
+                if (tokens is not None or method is not None)
+                else vllm_config.quant_config
+            )
 
             self.score = ReplicatedLinear(
                 model_config.get_hidden_size(),
                 text_config.num_labels,
                 bias=False,
-                params_dtype=vllm_config.model_config.head_dtype,
+                params_dtype=model_config.head_dtype,
                 quant_config=quant_config,
                 return_bias=False,
                 prefix=maybe_prefix(prefix, "score"),
@@ -452,7 +474,6 @@ def load_weights_using_from_2_way_softmax(
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
     model_config = model.vllm_config.model_config
-    quant_config = model.vllm_config.quant_config
     hf_config = model.config
     text_config = hf_config.get_text_config()
 
@@ -466,9 +487,11 @@ def load_weights_using_from_2_way_softmax(
 
     language_model = _get_language_model_for_seq_cls(model)
     is_vlm = language_model is not model
+    using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
-        text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
+        text_config.vocab_size,
+        text_config.hidden_size,
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
@@ -506,14 +529,16 @@ def load_weights_using_from_2_way_softmax(
         torch.float32
     ) - lm_head_weight.data[[false_id]].to(torch.float32)
 
-    score_layer = language_model.score if is_vlm else model.score
+    score_layer = language_model.score if using_vlm_head else model.score
     param = score_layer.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
     del language_model.lm_head
 
-    score_weight_name = "language_model.score.weight" if is_vlm else "score.weight"
+    score_weight_name = (
+        "language_model.score.weight" if using_vlm_head else "score.weight"
+    )
     loaded_weights.add(score_weight_name)
 
     lm_head_name = "lm_head.weight"
@@ -528,7 +553,6 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
     model_config = model.vllm_config.model_config
-    quant_config = model.vllm_config.quant_config
     text_config = model.config.get_text_config()
 
     tokens = getattr(text_config, "classifier_from_token", [])
@@ -537,9 +561,11 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
 
     language_model = _get_language_model_for_seq_cls(model)
     is_vlm = language_model is not model
+    using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
-        text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
+        text_config.vocab_size,
+        text_config.hidden_size,
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
@@ -572,14 +598,16 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
     score_weight = language_model.lm_head.weight.data[token_ids]
 
-    score_layer = language_model.score if is_vlm else model.score
+    score_layer = language_model.score if using_vlm_head else model.score
     param = score_layer.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
     del language_model.lm_head
 
-    score_weight_name = "language_model.score.weight" if is_vlm else "score.weight"
+    score_weight_name = (
+        "language_model.score.weight" if using_vlm_head else "score.weight"
+    )
     loaded_weights.add(score_weight_name)
 
     lm_head_name = "lm_head.weight"

@@ -1,0 +1,23 @@
+Optimize tq_decode_stage1_hip kernel from 530us to <50us for B=4, seq_len=8192, NUM_KV_SPLITS=8.
+
+This kernel is the SOLE bottleneck. BL paged_attention: 24us. TQ stage1: 530us (22x slower).
+TQ reads only 27% of BL's data (4-bit vs BF16) but takes 22x longer. HBM efficiency: 0.7%.
+
+Current v52 kernel: geak_tq_decode/hip_kernel/tq_decode_stage1_v52.hip
+- Grid: (B, Hq, NUM_KV_SPLITS), Block: 64 threads = 2 warps x 32
+- BLOCK_KV=4, VGPR=28, LDS=1536B
+- 136 serial loop iterations for split_len=1088
+
+Root cause: WG=64 threads (1 wavefront), occupancy ~21%, no memory-level parallelism.
+BLOCK_KV=8 causes register spilling -> segfault. Keep BLOCK_KV=4.
+
+Build:
+  cd /shareddata/amd/jiangyon/vllm_turboquant/geak_tq_decode/hip_kernel && hipcc --offload-arch=gfx942 -shared -fPIC -O3 -ffast-math -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -o /shareddata/amd/jiangyon/vllm_turboquant/vllm/v1/attention/ops/tq_decode_hip.so tq_decode_stage1_v52.hip
+
+Test:
+  cd /shareddata/amd/jiangyon/vllm_turboquant && TRITON_CACHE_DIR=/shareddata/amd/jiangyon/triton_cache HIP_VISIBLE_DEVICES=3 TQ_ALLOW_STALE_HIP_SO=1 python3 geak_tq_decode/test_correctness.py
+
+Bench:
+  cd /shareddata/amd/jiangyon/vllm_turboquant && TRITON_CACHE_DIR=/shareddata/amd/jiangyon/triton_cache HIP_VISIBLE_DEVICES=3 TQ_ALLOW_STALE_HIP_SO=1 python3 geak_tq_decode/benchmark_tq_decode.py --sweep
+
+Target: B=4 seq=8192 < 50 us/call

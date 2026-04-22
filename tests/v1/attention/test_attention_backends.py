@@ -13,6 +13,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
+    try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
 from vllm.config import ModelConfig
@@ -38,6 +39,8 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.TREE_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
+
+DEVICE_TYPE = current_platform.device_type
 
 # Remove flashinfer from the list if it's not available
 try:
@@ -178,7 +181,7 @@ def create_and_prepopulate_kv_cache(
         block_table[i, :num_blocks_for_seq] = inv_perm[start:end]
         start_block_idx += num_blocks_for_seq
 
-        # Create a realistic slot mapping that corresponds to the block table
+    # Create a realistic slot mapping that corresponds to the block table
     for i in range(batch_size):
         token_offsets = torch.arange(int(query_lens[i])) + int(context_lens[i])
         block_indices = token_offsets // block_size
@@ -295,6 +298,10 @@ def run_attention_backend(
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
+    if not try_backend_includes_kv_cache_update(actual_backend):
+        impl.do_kv_cache_update(
+            mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
+        )
     output = impl.forward(
         mock_layer, query, key, value, kv_cache, attn_metadata, output=output
     )
@@ -361,7 +368,7 @@ def _test_backend_correctness(
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 

@@ -9,7 +9,6 @@ on HuggingFace model repository.
 """
 
 import os
-from dataclasses import asdict
 from typing import Any, NamedTuple
 
 from huggingface_hub import snapshot_download
@@ -70,6 +69,66 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# CohereASR
+def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
+    assert audio_count == 1, "CohereASR only support single audio input per prompt"
+    model_name = "CohereLabs/cohere-transcribe-03-2026"
+
+    prompt = (
+        "<|startofcontext|><|startoftranscript|>"
+        "<|emo:undefined|><|en|><|en|><|pnc|><|noitn|>"
+        "<|notimestamp|><|nodiarize|>"
+    )
+    engine_args = EngineArgs(
+        model=model_name,
+        limit_mm_per_prompt={"audio": audio_count},
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
+# MusicFlamingo
+def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "nvidia/music-flamingo-2601-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    # MusicFlamingo prompt placeholders use <sound>; vLLM's MusicFlamingo
+    # multimodal processor expands each one into <|sound_bos|> + audio tokens +
+    # <|sound_eos|> based on extracted audio feature lengths.
+    audio_placeholder = "<sound>" * audio_count
+    system_prompt = (
+        "You are Music Flamingo, a multimodal assistant for language and music. "
+        "On each turn you receive an audio clip which contains music and optional "
+        "text, you will receive at least one or both; use your world knowledge and "
+        "reasoning to help the user with any task. Interpret the entirety of the "
+        "content any input music--regardlenss of whether the user calls it audio, "
+        "music, or sound."
+    )
+
+    prompt = (
+        "<|im_start|>system\n"
+        f"{system_prompt}<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_placeholder}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Gemma3N
 def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     model_name = "google/gemma-3n-E2B-it"
@@ -117,6 +176,31 @@ def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# FunAudioChat
+def run_funaudiochat(question: str, audio_count: int) -> ModelRequestData:
+    # NOTE: FunAudioChat is not available on the HuggingFace Hub at the time of
+    # writing. Pass a local model path via `--model`.
+    model_name = "funaudiochat"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    audio_in_prompt = "".join(
+        ["<|audio_bos|><|AUDIO|><|audio_eos|>\n" for _ in range(audio_count)]
+    )
+    prompt = f"{audio_in_prompt}{question}"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     # NOTE - the setting in this example are somewhat different from what is
@@ -145,6 +229,34 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompts,
         lora_requests=[LoRARequest("speech", 1, speech_lora_path)],
+    )
+
+
+# Kimi-Audio-7B-Instruct
+def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
+    """Kimi-Audio-7B-Instruct for audio transcription and understanding."""
+    model_name = "moonshotai/Kimi-Audio-7B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    # Kimi-Audio uses <|im_kimia_text_blank|> as placeholder for audio features
+    audio_placeholder = "<|im_kimia_text_blank|>" * audio_count
+    # Default prompt for transcription
+    if not question:
+        question = "Please transcribe the audio"
+    prompt = f"{audio_placeholder}{question}"
+
+    # Stop at EOS token (151644) to prevent repetition
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        stop_token_ids=[151644],
     )
 
 
@@ -305,6 +417,25 @@ def run_qwen2_5_omni(question: str, audio_count: int):
     )
 
 
+def run_qwen3_asr(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "Qwen/Qwen3-Asr-1.7B"
+
+    audio_in_prompt = "<|audio_start|><|audio_pad|><|audio_end|>\n" * audio_count
+    prompt = f"<|im_start|>user\n{audio_in_prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Ultravox 0.5-1B
 def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
     model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
@@ -406,16 +537,42 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# FireRedLID
+def run_fireredlid(question: str, audio_count: int) -> ModelRequestData:
+    assert audio_count == 1, "FireRedLID only supports single audio input per prompt"
+    model_name = "PatchyTisa/FireRedLID-vllm"
+
+    prompt = "<sos>"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
+    "cohere_asr": run_cohere_asr,
+    "fireredlid": run_fireredlid,
+    "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
     "granite_speech": run_granite_speech,
+    "kimi_audio": run_kimi_audio,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
+    "musicflamingo": run_musicflamingo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "qwen3_asr": run_qwen3_asr,
     "ultravox": run_ultravox,
     "voxtral": run_voxtral,
     "whisper": run_whisper,
@@ -434,6 +591,12 @@ def parse_args():
         default="ultravox",
         choices=model_example_map.keys(),
         help='Huggingface "model_type".',
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model ID or local path override. Required for funaudiochat.",
     )
     parser.add_argument(
         "--num-prompts", type=int, default=1, help="Number of prompts to run."
@@ -467,6 +630,9 @@ def main(args):
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
+    if model == "funaudiochat" and not args.model:
+        raise ValueError("--model is required when --model-type=funaudiochat")
+
     if args.tensor_parallel_size is not None and args.tensor_parallel_size < 1:
         raise ValueError(
             f"tensor_parallel_size must be a positive integer, "
@@ -477,6 +643,8 @@ def main(args):
     req_data = model_example_map[model](
         question_per_audio_count[audio_count], audio_count
     )
+    if model == "funaudiochat":
+        req_data.engine_args.model = args.model
 
     # Disable other modalities to save memory
     default_limits = {"image": 0, "video": 0, "audio": 0}
@@ -484,7 +652,7 @@ def main(args):
         req_data.engine_args.limit_mm_per_prompt or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = vars(req_data.engine_args) | {"seed": args.seed}
     if args.tensor_parallel_size is not None:
         engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)

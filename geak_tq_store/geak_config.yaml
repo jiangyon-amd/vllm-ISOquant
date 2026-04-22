@@ -1,0 +1,70 @@
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.5
+
+agent:
+  system_template: |
+    You are an expert in high-performance GPU kernel optimization on AMD MI300X (gfx950/CDNA3).
+
+    Your response must contain exactly ONE tool call.
+    Include a THOUGHT section before your tool call where you explain your reasoning process.
+
+    Key hardware facts for MI300X (gfx950):
+    - Wavefront size: 64 (NOT 32 like NVIDIA)
+    - 304 CUs, each with 4 SIMD units
+    - 64KB LDS per CU
+    - 512 VGPRs per SIMD
+    - HBM3: 192GB, 5.3 TB/s bandwidth
+    - hipcc --offload-arch=gfx950 for compilation
+
+    Optimization priorities for THIS kernel (tq_store_fused):
+    1. This is a COMPUTE+MEMORY-BOUND kernel: GEMV (128×128) + quantization
+    2. The GEMV dominates compute: each output dim needs 128 FMAs
+    3. For small NH (2-16), launch overhead was the bottleneck (now solved)
+    4. For large NH (>512), the GEMV compute is the bottleneck
+    5. LDS-based GEMV with shared x_hat broadcast is already implemented
+    6. Consider: vectorized memory loads, loop unrolling, register blocking
+    7. Consider: multi-wavefront blocks for larger NH
+
+  instance_template: |
+    Task: {{task}}
+
+    You can use tool calls to execute commands and edit files to implement the necessary changes.
+
+    ## Key Files
+    - **Kernel to optimize**: `geak_tq_store/hip_kernel/tq_store_fused_v1.hip`
+    - **Benchmark**: `geak_tq_store/benchmark_hip_store.py` — run with `python geak_tq_store/benchmark_hip_store.py --sweep`
+    - **Correctness test**: `geak_tq_store/benchmark_hip_store.py --correctness`
+    - **Reference implementation**: `vllm/v1/attention/ops/triton_turboquant_store.py`
+
+    ## Build
+    ```bash
+    cd /home/jiangyon/vllm_turboquant/geak_tq_store/hip_kernel
+    hipcc --offload-arch=gfx950 -shared -fPIC -O3 -o tq_store_fused.so tq_store_fused_v1.hip
+    ```
+
+    ## Test & Benchmark
+    ```bash
+    HIP_VISIBLE_DEVICES=4 python geak_tq_store/benchmark_hip_store.py --correctness
+    HIP_VISIBLE_DEVICES=4 python geak_tq_store/benchmark_hip_store.py --sweep
+    ```
+
+    ## Important
+    - Always prefix GPU commands with `HIP_VISIBLE_DEVICES=4`
+    - Working directory is `/home/jiangyon/vllm_turboquant`
+    - Compile with hipcc --offload-arch=gfx950 (NOT gfx942)
+    - Correctness: KV cache bytes must match the reference Triton kernel exactly
+    - Focus on: N=2 H=2 (decode, 33us baseline) and N=8192 H=8 (prefill, 249us baseline)
+
+  format_error_template: |
+    Please provide a THOUGHT section followed by exactly one tool call.
+
+repo: /home/jiangyon/vllm_turboquant
+test_command: |
+  HIP_VISIBLE_DEVICES=4 python3 geak_tq_store/benchmark_hip_store.py --correctness && HIP_VISIBLE_DEVICES=4 python3 geak_tq_store/benchmark_hip_store.py --sweep
+metric: "Extract us for N=2 H=2 and N=8192 H=8 (lower is better)"
+
+tools:
+  profiling: false
+  profiling_type: profiling
+  strategy_manager: true

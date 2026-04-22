@@ -1,0 +1,104 @@
+Optimize the Triton kernel `_tq_decode_stage1` in the file vllm/v1/attention/ops/triton_turboquant_decode.py (line 41-310).
+
+This kernel is the #1 performance bottleneck in TurboQuant KV cache compression, consuming 56.8% of total GPU time on MI300X (rocprofv3 measured).
+
+## What This Kernel Does
+
+TurboQuant decode attention stage1: for each query token, iterate over compressed KV cache entries (tiled by BLOCK_KV), compute attention scores from MSE-quantized keys, dequantize 4-bit values, and accumulate weighted values using online softmax.
+
+The inner loop (per BLOCK_KV=4 tokens) does:
+1. **MSE key unpack**: 2 byte loads per dim → 16-bit → shift+mask → centroid index → gather from 16 centroids
+2. **Norm correction**: compute L2 norm of centroid vector, normalize
+3. **Score computation**: dot(q_rot, centroids) * vec_norm * scale
+4. **Online softmax**: max, exp, rescale
+5. **Value dequant**: 4-bit unpack → scale * idx + zero
+6. **Value accumulation**: weighted sum
+
+## Target Hardware
+
+AMD MI300X (gfx942, CDNA3 architecture):
+- 304 CUs, wavefront_size=64
+- 192GB HBM3, 5.3 TB/s bandwidth
+- 64KB LDS per CU, 512 VGPRs per SIMD
+
+## Current Performance (Baseline)
+
+Measured with `benchmark_tq_decode.py --sweep`:
+
+| B   | seq_len | us/call |
+|-----|---------|---------|
+| 32  | 512     | 130.7   |
+| 100 | 512     | 376.8   |
+| 200 | 512     | 731.0   |
+| 100 | 1024    | 706.1   |
+| 100 | 2048    | 1359.4  |
+
+Target: reduce B=100/seq=512 from 376.8us to <250us (1.5x speedup). CUDA H100 achieves ~180us for equivalent workload.
+
+## Current Launch Config
+
+- Grid: (B, Hq=32, NUM_KV_SPLITS=32)
+- BLOCK_KV=4 (tokens per tile in inner loop)
+- num_warps=1, num_stages=1
+- HEAD_DIM=128, BLOCK_D=128, BLOCK_SIZE=16
+
+## Key Parameters (4bit_nc preset, D=128)
+
+- MSE_BITS=4, N_CENTROIDS=16
+- MSE_BYTES=64 (ceil(128*4/8))
+- KPS=68 (key_packed_size)
+- VQB=4 (value quant bits)
+- VAL_DATA_BYTES=64 (ceil(128*4/8))
+- NORM_CORRECTION=1
+- KEY_FP8=0
+
+## Profiling Analysis (rocprofv3 on MI300X)
+
+The kernel is **memory-bandwidth bound**, not compute-bound:
+- Each iteration loads BLOCK_KV * slot_size bytes from HBM (scattered across paged KV cache)
+- Two separate byte loads per MSE index (lines 176-186): loads byte[i] and byte[i+1] as individual uint8, combines to uint16
+- Same pattern for value dequant (lines 280-295) and norm loading (lines 212-218)
+- Centroid gather: indirect load via `Centroids_ptr + mse_idx` (16 centroids × 4 bytes = 64 bytes total)
+
+## Optimization Directions
+
+1. **Reduce memory loads in MSE unpack** (highest impact)
+   - Current: 2 × tl.load of uint8 → combine to int16 → shift+mask
+   - Consider: load as uint16 directly (if alignment permits), or load larger chunks (uint32) and extract multiple indices
+   - For 4-bit MSE with D=128: 64 bytes of MSE data per token — could load as 16×uint32
+
+2. **Preload centroids to registers/LDS**
+   - Only 16 centroids × 4 bytes = 64 bytes — fits in registers
+   - Current: indirect global load per dimension
+   - Consider: preload all 16 centroids before the inner loop
+
+3. **Reduce value dequant loads**
+   - For 4-bit values: 64 bytes per token, current loads via byte-level addressing
+   - Consider: load as uint32 blocks, extract 8 × 4-bit values per 32-bit word
+
+4. **Increase BLOCK_KV**
+   - Current BLOCK_KV=4 → very small tile, high loop overhead
+   - CAREFUL: previous tuning showed BLOCK_KV=4 is optimal on MI300X
+   - BUT: that was without the other memory optimizations — retry after reducing per-iteration cost
+
+5. **Tune num_warps**
+   - Current: num_warps=1 (64 threads on MI300X)
+   - With improved memory access patterns, more warps might help hide latency
+
+6. **Fuse norm load with MSE load**
+   - Norms (2 bytes) are adjacent to MSE data in cache slot
+   - Load MSE + norms in one wider load
+
+## Files
+
+- Kernel: `vllm/v1/attention/ops/triton_turboquant_decode.py` (modify `_tq_decode_stage1`)
+- Launcher: same file, `triton_turboquant_decode_attention()` function (modify launch config)
+- Benchmark: `geak_tq_decode/benchmark_tq_decode.py`
+
+## Correctness
+
+After optimization, the kernel must produce identical numerical results. The benchmark calls the full decode attention (stage1 + stage2) and returns the output tensor. You can verify by comparing output tensors before/after with torch.allclose(atol=1e-3).
+
+IMPORTANT: Use REAL production parameters for benchmarking:
+- B=100, Hq=32, Hk=8, D=128, seq_len=512, block_size=16
+- Do NOT use tiny shapes that don't represent production workload

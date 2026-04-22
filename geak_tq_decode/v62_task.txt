@@ -1,0 +1,1 @@
+Optimize tq_decode_v62_fused.hip to beat 206us for B=4 seq=8192. Read v62_design_notes.md and GEAK_TASK_V62.md for context. DO NOT use __threadfence or atomicAdd.

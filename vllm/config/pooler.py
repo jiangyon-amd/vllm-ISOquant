@@ -3,10 +3,9 @@
 
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.tasks import PoolingTask
 from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
@@ -19,9 +18,13 @@ TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 
 
 @config
-@dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
+
+    task: PoolingTask | None = None
+    """
+    The task used for pooling.
+    """
 
     pooling_type: SequencePoolingType | TokenPoolingType | None = None
     """
@@ -45,17 +48,19 @@ class PoolerConfig:
     The pooling method used for tokenwise pooling.
     """
 
-    ## for embeddings models
-    normalize: bool | None = None
+    use_activation: bool | None = None
     """
-    DEPRECATED: please use `use_activation` instead.
+    Whether to apply activation function to the pooler outputs.
+    `None` uses the pooler's default, which is `True` in most cases.
     """
+
+    ## for embedding models
     dimensions: int | None = None
     """
     Reduce the dimensions of embeddings if model
     support matryoshka representation. Defaults to None.
     """
-    enable_chunked_processing: bool | None = None
+    enable_chunked_processing: bool = False
     """
     Whether to enable chunked processing for long inputs that exceed the model's
     maximum position embeddings. When enabled, long inputs will be split into
@@ -73,22 +78,16 @@ class PoolerConfig:
     """
 
     ## for classification models
-    softmax: float | None = None
-    """
-    DEPRECATED: please use `use_activation` instead.
-    """
-    activation: float | None = None
-    """
-    DEPRECATED: please use `use_activation` instead.
-    """
-    use_activation: bool | None = None
-    """
-    Whether to apply activation function to the classification outputs.
-    Defaults to True.
-    """
     logit_bias: float | None = None
     """
     If provided, apply classification logit biases. Defaults to None.
+    """
+
+    logit_scale: float | None = None
+    """
+    If provided, scale the classification logits by this factor before
+    activation. Combined with logit_bias, enables affine score calibration:
+    activation(logit_scale * (score - logit_bias)). Defaults to None.
     """
 
     ## for reward models
@@ -105,10 +104,7 @@ class PoolerConfig:
     `math-shepherd-mistral-7b-prm` model.
     """
 
-    def __post_init__(self):
-        # raise deprecated warning for softmax and activation
-        self.use_activation = get_use_activation(self)
-
+    def __post_init__(self) -> None:
         if pooling_type := self.pooling_type:
             if self.seq_pooling_type is not None:
                 raise ValueError(
@@ -125,14 +121,14 @@ class PoolerConfig:
                     pooling_type,
                     pooling_type,
                 )
-                self.seq_pooling_type = pooling_type
+                self.seq_pooling_type = pooling_type  # type: ignore[assignment]
             elif pooling_type in TOK_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
-                self.tok_pooling_type = pooling_type
+                self.tok_pooling_type = pooling_type  # type: ignore[assignment]
             else:
                 raise NotImplementedError(pooling_type)
 
@@ -161,28 +157,3 @@ class PoolerConfig:
         factors: list[Any] = []
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
-
-
-def get_use_activation(o: object):
-    if (normalize := getattr(o, "normalize", None)) is not None:
-        logger.warning_once(
-            "`normalize` is deprecated and will be removed in v0.15. "
-            "Please use `use_activation` instead."
-        )
-        return normalize
-
-    if (softmax := getattr(o, "softmax", None)) is not None:
-        logger.warning_once(
-            "`softmax` is deprecated and will be removed in v0.15. "
-            "Please use `use_activation` instead."
-        )
-        return softmax
-
-    if (activation := getattr(o, "activation", None)) is not None:
-        logger.warning_once(
-            "`activation` is deprecated and will be removed in v0.15. "
-            "Please use `use_activation` instead."
-        )
-        return activation
-
-    return getattr(o, "use_activation", None)

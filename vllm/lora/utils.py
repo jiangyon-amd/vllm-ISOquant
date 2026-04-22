@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import huggingface_hub
+import regex as re
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
@@ -43,6 +44,25 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+
+def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
+    """
+    Returns num_active_loras values for cudagraph capture.
+
+    When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
+    When specialize=False: just [max_loras + 1].
+
+    This is the single source of truth for LoRA capture cases, used by both
+    CudagraphDispatcher and PunicaWrapperGPU.
+    """
+    if not specialize:
+        return [max_loras + 1]
+
+    return [
+        n for n in range(1, max_loras + 2) if (n & (n - 1)) == 0 or n == max_loras + 1
+    ]
+
 
 _GLOBAL_LORA_ID = 0
 
@@ -131,7 +151,7 @@ def replace_submodule(
 
 
 def parse_fine_tuned_lora_name(
-    name: str, weights_mapper: Optional["WeightsMapper"] = None
+    name: str, weights_mapper: "WeightsMapper | None" = None
 ) -> tuple[str, bool]:
     """Parse the name of lora weights.
 
@@ -174,7 +194,7 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_base_embeddding_weights(name: str) -> bool:
+def is_base_embedding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
     embedding_suffixes = (
         ".embed_tokens.base_layer.weight",
@@ -205,6 +225,57 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)
+
+
+def is_supported_lora_module(
+    module_name: str,
+    supported_lora_modules: list[str],
+) -> bool:
+    """Check if a module is in the model's supported LoRA modules.
+
+    Uses regex suffix matching against the model-defined supported modules
+    list (e.g., matching "model.layers.0.self_attn.o_proj" against
+    "o_proj").
+
+    Args:
+        module_name: Full dot-separated module name.
+        supported_lora_modules: List of module suffixes supported by the
+            model.
+
+    Returns:
+        True if the module is supported, False otherwise.
+    """
+    return any(
+        re.match(
+            r".*\.{target_module}$".format(target_module=target_module),
+            module_name,
+        )
+        or target_module == module_name
+        for target_module in supported_lora_modules
+    )
+
+
+def is_in_target_modules(
+    module_name: str,
+    target_modules: list[str] | None,
+) -> bool:
+    """Check if a module passes the deployment-time target_modules filter.
+
+    When target_modules is None (no restriction), all modules pass.
+    Otherwise, the module's suffix must be in the target_modules list.
+
+    Args:
+        module_name: Full dot-separated module name.
+        target_modules: Optional deployment-time restriction list from
+            LoRAConfig.target_modules.
+
+    Returns:
+        True if the module passes the filter, False otherwise.
+    """
+    if target_modules is None:
+        return True
+    module_suffix = module_name.split(".")[-1]
+    return module_suffix in set(target_modules)
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:

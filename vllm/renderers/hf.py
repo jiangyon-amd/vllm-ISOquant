@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections import deque
+import itertools
+from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -13,7 +14,7 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormat,
@@ -24,15 +25,18 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
-from vllm.tokenizers import cached_get_tokenizer
-from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
+from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
-from .protocol import RendererLike
+from .base import BaseRenderer
+from .inputs import DictPrompt
+from .inputs.preprocess import parse_dec_only_prompt
+from .params import ChatParams
 
 logger = init_logger(__name__)
 
@@ -98,7 +102,9 @@ def resolve_chat_template(
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
-        return chat_template
+        # Resolve template names (e.g. "tool_use") to actual Jinja content
+        # so that downstream kwargs detection can parse template variables.
+        return tokenizer.get_chat_template(chat_template, tools=tools)
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
@@ -429,6 +435,28 @@ def resolve_chat_template_kwargs(
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[True] = ...,
+    **kwargs,
+) -> list[int]: ...
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[False] = ...,
+    **kwargs,
+) -> str: ...
 def safe_apply_chat_template(
     model_config: "ModelConfig",
     tokenizer: HfTokenizer,
@@ -477,124 +505,232 @@ def safe_apply_chat_template(
         raise ValueError(str(e)) from e
 
 
-class HfRenderer(RendererLike):
-    @classmethod
-    def from_config(
-        cls,
-        config: ModelConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
-        return cls(config, tokenizer_kwargs)
+def rebuild_mm_uuids_from_mm_data(
+    mm_uuids: MultiModalUUIDDict,
+    mm_data: MultiModalDataDict,
+) -> MultiModalUUIDDict:
+    """Rebuild mm_uuids after vision_chunk processing.
 
+    When videos are split into chunks, the original UUIDs need to be updated
+    to reflect the new UUIDs generated for each chunk.
+
+    Args:
+        mm_uuids: Original UUIDs dictionary
+        mm_data: Processed multimodal data with vision_chunk items
+
+    Returns:
+        Updated UUIDs dictionary with chunk UUIDs
+    """
+    vision_chunks = mm_data.get("vision_chunk")
+    if vision_chunks is None:
+        return mm_uuids
+
+    assert all(isinstance(item, dict) for item in vision_chunks), (
+        "Expected all vision_chunk items to be dicts"
+    )
+    vision_chunks = cast(list[dict[str, Any]], vision_chunks)
+    vision_chunk_uuids = [
+        uuid_val for item in vision_chunks if (uuid_val := item.get("uuid")) is not None
+    ]
+
+    if vision_chunk_uuids:
+        mm_uuids = dict(mm_uuids)
+        mm_uuids["vision_chunk"] = vision_chunk_uuids
+
+    return mm_uuids
+
+
+def build_video_prompts_from_mm_data(
+    mm_data: MultiModalDataDict,
+) -> list[str]:
+    """Build video prompts from vision_chunk data.
+
+    Collects prompts from video chunks and groups them by video_idx.
+
+    Args:
+        mm_data: Processed multimodal data with vision_chunk items
+
+    Returns:
+        List of video prompts, one per video.
+    """
+    vision_chunks = mm_data.get("vision_chunk")
+    if vision_chunks is None:
+        return []
+
+    # Group chunks by video_idx
+    video_prompts_dict: dict[int, list[str]] = defaultdict(list)
+
+    for item in vision_chunks:
+        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
+        assert isinstance(item, dict)
+        if item.get("type") == "video_chunk":
+            video_idx = item.get("video_idx", 0)
+            prompt = item.get("prompt", "")
+            video_prompts_dict[video_idx].append(prompt)
+
+    # Build prompts in video order
+    video_prompts = [
+        "".join(video_prompts_dict[video_idx])
+        for video_idx in sorted(video_prompts_dict.keys())
+    ]
+
+    return video_prompts
+
+
+def replace_vision_chunk_video_placeholder(
+    prompt_raw: str | list[int],
+    mm_data: MultiModalDataDict,
+    video_placeholder: str | None,
+) -> str | list[int]:
+    # get video placeholder, replace it with runtime video-chunk prompts
+    if video_placeholder and isinstance(prompt_raw, str):
+        video_prompts = build_video_prompts_from_mm_data(mm_data)
+
+        # replace in order
+        prompt_raw_parts = prompt_raw.split(video_placeholder)
+        if len(prompt_raw_parts) == len(video_prompts) + 1:
+            prompt_raw = "".join(
+                itertools.chain.from_iterable(zip(prompt_raw_parts, video_prompts))
+            )
+            prompt_raw += prompt_raw_parts[-1]
+        else:
+            logger.warning(
+                "Number of video placeholders (%d) does not match "
+                "number of videos (%d) in the request.",
+                len(prompt_raw_parts) - 1,
+                len(video_prompts),
+            )
+    return prompt_raw
+
+
+class HfRenderer(BaseRenderer[HfTokenizer]):
     def __init__(
         self,
-        config: ModelConfig,
-        tokenizer_kwargs: dict[str, Any],
+        config: VllmConfig,
+        tokenizer: HfTokenizer | None,
     ) -> None:
-        super().__init__()
+        super().__init__(config, tokenizer)
 
-        self.config = config
+        self.use_unified_vision_chunk = getattr(
+            config.model_config.hf_config, "use_unified_vision_chunk", False
+        )
 
-        if config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cast(
-                HfTokenizer,
-                cached_get_tokenizer(
-                    tokenizer_cls=CachedHfTokenizer,  # type: ignore[type-abstract]
-                    **tokenizer_kwargs,
-                ),
-            )
-
-        self._tokenizer = tokenizer
-
-    @property
-    def tokenizer(self) -> HfTokenizer | None:
-        return self._tokenizer
-
-    def get_tokenizer(self) -> HfTokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
+        self._apply_chat_template_async = make_async(
+            safe_apply_chat_template, executor=self._executor
+        )
 
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
-        model_config = self.config
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             model_config,
             content_format=resolve_chat_template_content_format(
-                chat_template=kwargs.get("chat_template"),
-                tools=kwargs.get("tools"),
-                given_format=chat_template_content_format,
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
             model_config,
             tokenizer,
             conversation,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
+        # model which uses unified vision chunks for both images and videos.
+        if (
+            self.use_unified_vision_chunk
+            and mm_uuids is not None
+            and mm_data is not None
+        ):
+            mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
+
+            # get video placeholder, replace it with runtime video-chunk prompts
+            video_placeholder = getattr(
+                model_config.hf_config, "video_placeholder", None
+            )
+            prompt_raw = cast(
+                list[int],
+                replace_vision_chunk_video_placeholder(
+                    prompt_raw,
+                    mm_data,
+                    video_placeholder,
+                ),
+            )
+
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt
 
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
-        model_config = self.config
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             model_config,
             content_format=resolve_chat_template_content_format(
-                chat_template=kwargs.get("chat_template"),
-                tools=kwargs.get("tools"),
-                given_format=chat_template_content_format,
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        prompt_raw = safe_apply_chat_template(
+        prompt_raw = await self._apply_chat_template_async(
             model_config,
             tokenizer,
             conversation,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
+        # model which uses unified vision chunks for both images and videos.
+        if (
+            self.use_unified_vision_chunk
+            and mm_uuids is not None
+            and mm_data is not None
+        ):
+            # get video placeholder, replace it with runtime video-chunk prompts
+            video_placeholder = getattr(
+                model_config.hf_config, "video_placeholder", None
+            )
+            prompt_raw = cast(
+                list[int],
+                replace_vision_chunk_video_placeholder(
+                    prompt_raw,
+                    mm_data,
+                    video_placeholder,
+                ),
+            )
+
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt

@@ -1,3 +1,0 @@
-lm-eval[ifeval]
-tensorboard
-transformers

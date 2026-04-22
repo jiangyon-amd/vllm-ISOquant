@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Test correctness of v36 kernel."""
+import ctypes, math, os, torch
+
+DEVICE = "cuda:0"
+D = 128; Hk = 8; Hq = 32; BS = 16
+HIP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
+from vllm.model_executor.layers.quantization.turboquant.centroids import get_centroids
+from vllm.model_executor.layers.quantization.turboquant.quantizer import generate_wht_signs
+from vllm.v1.attention.backends.turboquant_attn import _build_hadamard
+from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
+
+def setup():
+    cfg = TurboQuantConfig.from_cache_dtype("turboquant_4bit_nc", D)
+    signs = generate_wht_signs(D, seed=42).to(DEVICE)
+    centroids = get_centroids(D, cfg.centroid_bits).to(DEVICE)
+    H_mat = _build_hadamard(D, DEVICE)
+    PiT = (signs.float().unsqueeze(1) * H_mat).contiguous()
+    Pi = PiT.T.contiguous()
+    c_sorted, _ = centroids.float().sort()
+    midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
+    return cfg, Pi, PiT, centroids, midpoints
+
+def run_hip_kernel(so_path, q_rot, kv_cache, bt, sls, centroids_f32, mid_o,
+                   B, Hq_l, NUM_KV_SPLITS, BLOCK_KV=8):
+    lib = ctypes.CDLL(so_path)
+    launch_fn = lib.launch_tq_decode_stage1
+    launch_fn.argtypes = (
+        [ctypes.c_void_p]*6 + [ctypes.c_int]*2 + [ctypes.c_int]*3 +
+        [ctypes.c_int]*1 + [ctypes.c_int]*3 + [ctypes.c_int]*4 +
+        [ctypes.c_float] + [ctypes.c_int]*2 + [ctypes.c_int]*2 + [ctypes.c_void_p]
+    )
+    launch_fn.restype = None
+    def run():
+        launch_fn(
+            q_rot.data_ptr(), kv_cache.data_ptr(), bt.data_ptr(), sls.data_ptr(),
+            centroids_f32.data_ptr(), mid_o.data_ptr(),
+            q_rot.stride(0), q_rot.stride(1),
+            kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
+            bt.stride(0), mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+            Hk, BS, NUM_KV_SPLITS, Hq_l // Hk,
+            1.0 / math.sqrt(D), BLOCK_KV, 1, B, Hq_l, 0)
+    return run
+
+def main():
+    B = 100; seq_len = 512; NUM_KV_SPLITS = 16
+    cfg, Pi, PiT, centroids, midpoints = setup()
+    num_blocks = max(8192, (B * seq_len // BS) + 1024)
+    kv_cache = torch.zeros(num_blocks, BS, Hk, cfg.slot_size_aligned, dtype=torch.uint8, device=DEVICE)
+    fill_n = min(B * seq_len, num_blocks * BS)
+    torch.manual_seed(42)
+    fk = torch.randn(fill_n, Hk, D, dtype=torch.bfloat16, device=DEVICE)
+    fv = torch.randn_like(fk)
+    triton_turboquant_store(fk, fv, kv_cache,
+        torch.arange(fill_n, device=DEVICE, dtype=torch.int64),
+        PiT, centroids, midpoints,
+        mse_bits=cfg.key_mse_bits, key_packed_size=cfg.key_packed_size,
+        value_quant_bits=cfg.effective_value_quant_bits, key_fp8=cfg.key_fp8)
+    torch.manual_seed(123)
+    q = torch.randn(B, Hq, D, dtype=torch.bfloat16, device=DEVICE)
+    bps = math.ceil(seq_len / BS)
+    bt = torch.arange(bps, device=DEVICE, dtype=torch.int32).unsqueeze(0).expand(B,-1).contiguous()
+    sls = torch.full((B,), seq_len, device=DEVICE, dtype=torch.int32)
+    
+    q_rot = (q.float() @ PiT).contiguous()
+    centroids_f32 = centroids.float().contiguous()
+
+    # v12 reference
+    mid_o_v12 = torch.zeros(B, Hq, NUM_KV_SPLITS, D + 1, dtype=torch.float32, device=DEVICE)
+    run_v12 = run_hip_kernel(os.path.join(HIP_DIR, "tq_decode_stage1_v12.so"), q_rot, kv_cache, bt, sls, centroids_f32, mid_o_v12, B, Hq, NUM_KV_SPLITS, BLOCK_KV=8)
+    run_v12()
+    torch.cuda.synchronize()
+
+    # v36
+    mid_o_v36 = torch.zeros(B, Hq, NUM_KV_SPLITS, D + 1, dtype=torch.float32, device=DEVICE)
+    run_v36 = run_hip_kernel(os.path.join(HIP_DIR, "tq_decode_stage1_v36.so"), q_rot, kv_cache, bt, sls, centroids_f32, mid_o_v36, B, Hq, NUM_KV_SPLITS, BLOCK_KV=8)
+    run_v36()
+    torch.cuda.synchronize()
+
+    # Compare outputs
+    diff = (mid_o_v12 - mid_o_v36).abs()
+    max_diff = diff.max().item()
+    mean_diff = diff.mean().item()
+    
+    print(f"Max diff: {max_diff:.6f}")
+    print(f"Mean diff: {mean_diff:.6f}")
+    
+    if max_diff < 0.1:
+        print("PASS: v36 output matches v12 reference")
+    else:
+        print("FAIL: v36 output differs from v12 reference")
+        print(f"v12 sample: {mid_o_v12[0, 0, 0, :5]}")
+        print(f"v36 sample: {mid_o_v36[0, 0, 0, :5]}")
+
+if __name__ == "__main__":
+    main()

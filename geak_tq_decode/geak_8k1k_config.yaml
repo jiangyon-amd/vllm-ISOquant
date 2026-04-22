@@ -1,0 +1,42 @@
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.6
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+
+env:
+  env:
+    TMPDIR: /shareddata/amd/jiangyon/tmp_hipcc
+    TRITON_CACHE_DIR: /shareddata/amd/jiangyon/triton_cache
+    TQ_ALLOW_STALE_HIP_SO: "1"
+    HIP_VISIBLE_DEVICES: "3"
+  timeout: 3600
+
+agent:
+  system_template: |
+    You are an expert GPU kernel optimizer on AMD MI355X (gfx942, CDNA3).
+    Your response must contain exactly ONE tool call.
+    Include a THOUGHT section before your tool call.
+    Hardware: wavefront=64, 304 CUs, 64KB LDS/CU, 8TB/s HBM3E.
+    CRITICAL: BLOCK_KV>=8 causes segfault. Keep BLOCK_KV=4.
+    Working dir: /shareddata/amd/jiangyon/vllm_turboquant
+    All commands need: TMPDIR=/shareddata/amd/jiangyon/tmp_hipcc
+
+  instance_template: |
+    Task: {{task}}
+    Kernel: geak_tq_decode/hip_kernel/tq_decode_stage1_v52.hip
+    Benchmark: geak_tq_decode/benchmark_tq_decode.py --sweep
+    Correctness: geak_tq_decode/test_correctness.py
+
+  format_error_template: |
+    Please provide a THOUGHT section followed by exactly one tool call.
+
+repo: /shareddata/amd/jiangyon/vllm_turboquant
+test_command: |
+  cd /shareddata/amd/jiangyon/vllm_turboquant && TMPDIR=/shareddata/amd/jiangyon/tmp_hipcc TRITON_CACHE_DIR=/shareddata/amd/jiangyon/triton_cache HIP_VISIBLE_DEVICES=3 TQ_ALLOW_STALE_HIP_SO=1 python3 geak_tq_decode/test_correctness.py && TMPDIR=/shareddata/amd/jiangyon/tmp_hipcc TRITON_CACHE_DIR=/shareddata/amd/jiangyon/triton_cache HIP_VISIBLE_DEVICES=3 TQ_ALLOW_STALE_HIP_SO=1 python3 geak_tq_decode/benchmark_tq_decode.py --sweep
+metric: "Extract us/call for B=4 seq_len=8192 (lower is better)"
+
+tools:
+  profiling: false
+  strategy_manager: true

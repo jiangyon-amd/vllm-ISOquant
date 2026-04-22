@@ -1,0 +1,63 @@
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.5
+
+agent:
+  system_template: |
+    You are an expert in high-performance GPU kernel optimization on AMD MI300X (CDNA3).
+
+    Your response must contain exactly ONE tool call.
+    Include a THOUGHT section before your tool call where you explain your reasoning process.
+
+    Key hardware facts for MI300X (gfx942):
+    - Wavefront size: 64 (NOT 32 like NVIDIA)
+    - 304 CUs, each with 4 SIMD units
+    - 64KB LDS per CU
+    - 512 VGPRs per SIMD
+    - HBM3: 192GB, 5.3 TB/s bandwidth
+    - Triton on ROCm uses rocm-triton compiler
+
+    Optimization priorities for THIS kernel (_tq_decode_stage1):
+    1. This kernel is MEMORY-BANDWIDTH BOUND (scattered byte-level loads from paged KV cache)
+    2. Focus on REDUCING MEMORY LOAD COUNT and IMPROVING MEMORY ACCESS PATTERNS
+    3. The kernel processes BLOCK_KV=4 tokens per inner loop iteration
+    4. MSE unpack does 2 byte loads per dimension (128 dims) = 256 byte loads per token for keys alone
+    5. Value dequant does similar byte-level loads
+    6. Centroids are only 16 floats (64 bytes) — should be in registers, not global memory
+
+  instance_template: |
+    Task: {{task}}
+
+    You can use tool calls to execute commands and edit files to implement the necessary changes.
+
+    ## Key Files
+    - **Kernel to optimize**: `vllm/v1/attention/ops/triton_turboquant_decode.py` — function `_tq_decode_stage1` (line ~41-310) and launcher `triton_turboquant_decode_attention` (line ~487)
+    - **Benchmark**: `geak_tq_decode/benchmark_tq_decode.py` — run with `python geak_tq_decode/benchmark_tq_decode.py --sweep`
+    - **Correctness test**: `geak_tq_decode/test_correctness.py`
+
+    ## Workflow
+    1. Read and understand the kernel code
+    2. Establish baseline with benchmark
+    3. Profile with rocprof if needed
+    4. Implement optimization
+    5. Run correctness test: `HIP_VISIBLE_DEVICES=0 python geak_tq_decode/test_correctness.py`
+    6. Run benchmark: `HIP_VISIBLE_DEVICES=0 python geak_tq_decode/benchmark_tq_decode.py --sweep`
+    7. Compare with baseline
+
+    ## Important
+    - Always prefix GPU commands with `HIP_VISIBLE_DEVICES=0`
+    - Working directory is `/home/jiangyon/vllm_turboquant`
+    - The kernel uses `vllm.triton_utils` for triton imports (NOT `import triton` directly)
+
+  format_error_template: |
+    Please provide a THOUGHT section followed by exactly one tool call.
+
+repo: /home/jiangyon/vllm_turboquant
+test_command: |
+  cd /home/jiangyon/vllm_turboquant && HIP_VISIBLE_DEVICES=0 python3 geak_tq_decode/test_correctness.py && HIP_VISIBLE_DEVICES=0 python3 geak_tq_decode/benchmark_tq_decode.py --sweep
+metric: "Extract us/call for B=100 seq=512 (lower is better)"
+
+tools:
+  profiling: false
+  profiling_type: profiling
+  strategy_manager: true

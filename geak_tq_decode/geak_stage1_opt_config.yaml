@@ -1,0 +1,107 @@
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.6
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+
+env:
+  env:
+    TMPDIR: /shareddata/amd/jiangyon/tmp_hipcc
+    TRITON_CACHE_DIR: /shareddata/amd/jiangyon/triton_cache
+    TQ_ALLOW_STALE_HIP_SO: "1"
+    HIP_VISIBLE_DEVICES: "2"
+    PYTHONPATH: "/shareddata/amd/jiangyon/vllm_turboquant"
+  timeout: 3600
+
+agent:
+  system_template: |
+    You are an expert GPU kernel optimizer on AMD MI355X (gfx950, CDNA4).
+    Your response must contain exactly ONE tool call.
+    Include a THOUGHT section before your tool call.
+
+    Hardware facts (gfx950):
+    - Wavefront size = 64 (code uses 2 × 32-lane "half-warps" per wavefront)
+    - Max workgroup = 1024 threads
+    - Max waves per CU = 32, 4 SIMDs per CU, 512 VGPRs per SIMD
+    - LDS: 64 KB per CU
+    - HBM: ~5.3 TB/s aggregate bandwidth
+    - __threadfence() is extremely expensive on multi-chiplet (~100+ us) — DO NOT USE
+
+    Working dir: /shareddata/amd/jiangyon/vllm_turboquant
+    Kernel: geak_tq_decode/hip_kernel/tq_decode_v52_no_nt.hip
+    This is the Stage1 attention kernel for TurboQuant decode.
+    It is memory-bandwidth bound (~2.9 bytes/FMA).
+
+    Current performance (Hq=64, Hk=8, splits=32):
+      B=4  seq=8192: ~204 us  (Stage1 alone: ~163 us = 80% of total)
+      B=20 seq=8192: ~700 us
+
+    Stage1 processes BLOCK_KV=4 tokens per warp iteration.
+    Grid=(B, Hq, num_kv_splits), Block=64 threads.
+    2 half-warps, each 32 lanes × 4 dims = 128 = HEAD_DIM.
+
+    Inner loop per iteration:
+      1. Load 4-bit MSE key indices (2 bytes per lane, 4 centroids per lane)
+      2. Centroid lookup from shared memory (16 entries)
+      3. Dot product q_rot · centroid_vec → wave reduction → score
+      4. Norm correction (rsqrt) + vec_norm multiply
+      5. Online softmax update
+      6. Load 4-bit value data (2 bytes per lane)
+      7. Dequant value (scale + zero) and weighted accumulate
+
+    Existing optimizations in v52:
+      - Software pipelining (prefetch prologue + load-after-consume)
+      - Block table page dedup (reuse block_num if same page)
+      - Bit shift for page_idx
+      - FMA chains for score/norm_sq
+      - __launch_bounds__(64, 8)
+
+    Optimization ideas to explore:
+    A. BLOCK_KV=8: process 8 tokens per half-warp instead of 4.
+       Reduces loop overhead, better ILP. But more registers.
+    B. 4 half-warps (128 threads): doubles parallelism within a block.
+       Was attempted in v60 but had issues — worth retrying.
+    C. Better prefetch: current prefetch is single-buffer.
+       Could try double-buffering or async copy if supported.
+    D. Reduce VGPR pressure: use fewer temporaries, allow higher occupancy.
+    E. Vectorized centroid lookup: precompute centroid pairs.
+    F. Loop structure: unroll inner kv loop fully, or change iteration order.
+
+    Constraints:
+    - Keep the exported C ABI: launch_tq_decode_stage1(...)
+    - Keep HEAD_DIM=128, MSE_BYTES=64, KPS=68, VAL_DATA_BYTES=64
+    - Correctness: all test_correctness.py cases must PASS
+    - Do NOT change the file name or function signature
+
+  instance_template: |
+    Task: {{task}}
+    Kernel: geak_tq_decode/hip_kernel/tq_decode_v52_no_nt.hip
+    Compile: TMPDIR=/shareddata/amd/jiangyon/tmp_hipcc hipcc --offload-arch=gfx950 -shared -fPIC -O3 -ffast-math geak_tq_decode/hip_kernel/tq_decode_v52_no_nt.hip -o vllm/v1/attention/ops/tq_decode_hip.so
+    Correctness: PYTHONPATH=.:$PYTHONPATH TQ_ALLOW_STALE_HIP_SO=1 HIP_VISIBLE_DEVICES=2 python3 geak_tq_decode/test_correctness.py
+    Benchmark: PYTHONPATH=.:$PYTHONPATH TQ_ALLOW_STALE_HIP_SO=1 HIP_VISIBLE_DEVICES=2 python3 geak_tq_decode/benchmark_tq_decode.py --sweep --iters 50
+    Metric: B=4 seq=8192 us/call (currently 204 us, lower is better)
+
+  format_error_template: |
+    Please provide a THOUGHT section followed by exactly one tool call.
+
+repo: /shareddata/amd/jiangyon/vllm_turboquant
+
+test_command: >-
+  cd /shareddata/amd/jiangyon/vllm_turboquant &&
+  TMPDIR=/shareddata/amd/jiangyon/tmp_hipcc
+  hipcc --offload-arch=gfx950 -shared -fPIC -O3 -ffast-math
+  geak_tq_decode/hip_kernel/tq_decode_v52_no_nt.hip
+  -o vllm/v1/attention/ops/tq_decode_hip.so 2>&1 &&
+  PYTHONPATH=/shareddata/amd/jiangyon/vllm_turboquant:$PYTHONPATH
+  TQ_ALLOW_STALE_HIP_SO=1 HIP_VISIBLE_DEVICES=2
+  python3 geak_tq_decode/test_correctness.py 2>&1 &&
+  PYTHONPATH=/shareddata/amd/jiangyon/vllm_turboquant:$PYTHONPATH
+  TQ_ALLOW_STALE_HIP_SO=1 HIP_VISIBLE_DEVICES=2
+  python3 geak_tq_decode/benchmark_tq_decode.py --sweep --iters 50
+
+metric: "B=4 seq_len=8192 us/call (lower is better). Baseline = 204 us."
+
+tools:
+  profiling: false
+  strategy_manager: true

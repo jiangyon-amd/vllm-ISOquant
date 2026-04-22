@@ -151,6 +151,7 @@ def mteb_test_embed_models(
 
     with vllm_runner(
         model_info.name,
+        revision=model_info.revision,
         runner="pooling",
         max_model_len=model_info.max_model_len,
         **vllm_extra_kwargs,
@@ -187,7 +188,10 @@ def mteb_test_embed_models(
         head_dtype = model_config.head_dtype
 
         # Test embedding_size, isnan and whether to use normalize
-        vllm_outputs = vllm_model.embed(example_prompts, truncate_prompt_tokens=-1)
+        vllm_outputs = vllm_model.embed(
+            example_prompts,
+            tokenization_kwargs=dict(truncate_prompt_tokens=-1),
+        )
         outputs_tensor = torch.tensor(vllm_outputs)
         assert not torch.any(torch.isnan(outputs_tensor))
         embedding_size = model_config.embedding_size
@@ -198,6 +202,7 @@ def mteb_test_embed_models(
     if model_info.mteb_score is None:
         with hf_runner(
             model_info.name,
+            revision=model_info.revision,
             is_sentence_transformer=True,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
         ) as hf_model:

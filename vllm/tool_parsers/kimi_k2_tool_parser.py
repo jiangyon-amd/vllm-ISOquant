@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -27,8 +28,8 @@ logger = init_logger(__name__)
 
 
 class KimiK2ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
@@ -448,7 +449,7 @@ class KimiK2ToolParser(ToolParser):
                 if current_tool_call_matches:
                     tool_id, tool_args = current_tool_call_matches.groups()
                     tool_name = tool_id.split(":")[0].split(".")[-1]
-                    current_tool_call["id"] = tool_id
+                    current_tool_call["id"] = tool_id.strip()
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
                 else:
@@ -458,7 +459,7 @@ class KimiK2ToolParser(ToolParser):
                     if current_tool_call_name_matches:
                         (tool_id_str,) = current_tool_call_name_matches.groups()
                         tool_name = tool_id_str.split(":")[0].split(".")[-1]
-                        current_tool_call["id"] = tool_id_str
+                        current_tool_call["id"] = tool_id_str.strip()
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
                     else:

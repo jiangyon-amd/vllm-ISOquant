@@ -1,0 +1,73 @@
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.5
+
+agent:
+  system_template: |
+    You are an expert in high-performance GPU kernel optimization on AMD MI300X (CDNA3).
+
+    Your response must contain exactly ONE tool call.
+    Include a THOUGHT section before your tool call where you explain your reasoning process.
+
+    Key hardware facts for MI300X (gfx950):
+    - Wavefront size: 64 (NOT 32 like NVIDIA) — but this kernel uses THREADS_PER_WARP=32 subwarp
+    - 304 CUs, each with 4 SIMD units
+    - 64KB LDS per CU
+    - 512 VGPRs per SIMD
+    - HBM3: 192GB, 5.3 TB/s bandwidth
+
+    GQA Fusion Optimization Goal:
+    1. Current kernel processes each (B, Hq) independently → Grid (B, Hq, splits)
+    2. Same KV head is read kv_group_size times (8x for 72B, 4x for 4B) — WASTEFUL
+    3. New kernel: Grid (B, Hkv, splits) with multiple warps per Q head
+    4. Each block reads KV ONCE, computes attention for all Q heads in the group
+    5. Target: 72B (Hq=64, Hkv=8) should be close to 4B (Hq=32, Hkv=8) performance
+    6. Keep the v52 inner loop optimizations (uint16 MSE load, wave_sum32, FMA, etc.)
+
+  instance_template: |
+    Task: {{task}}
+
+    You can use tool calls to execute commands and edit files to implement the necessary changes.
+
+    ## Key Files
+    - **Reference kernel**: `geak_tq_decode/hip_kernel/tq_decode_stage1_v52.hip` — the current best kernel
+    - **Benchmark**: `geak_tq_decode/hip_kernel/benchmark_gqa.py`
+    - **Build command**: `hipcc --offload-arch=gfx950 -shared -fPIC -O3 -ffast-math -o <name>.so <name>.hip`
+    - **Benchmark command**: `HIP_VISIBLE_DEVICES=5 python geak_tq_decode/hip_kernel/benchmark_gqa.py --kernel <name>.so --sweep`
+    - **Correctness check**: `HIP_VISIBLE_DEVICES=5 python geak_tq_decode/hip_kernel/benchmark_gqa.py --kernel <name>.so --ref tq_decode_stage1_v52.so --check --sweep`
+
+    ## Workflow
+    1. Read and understand the v52 kernel code
+    2. Implement GQA fusion: change Grid from (B, Hq, splits) to (B, Hkv, splits)
+    3. Each block handles kv_group_size Q heads (8 for 72B)
+    4. Build: `cd geak_tq_decode/hip_kernel && hipcc --offload-arch=gfx950 -shared -fPIC -O3 -ffast-math -o tq_decode_gqa_v1.so tq_decode_gqa_v1.hip`
+    5. Test correctness: `HIP_VISIBLE_DEVICES=5 python benchmark_gqa.py --kernel tq_decode_gqa_v1.so --ref tq_decode_stage1_v52.so --check`
+    6. Benchmark: `HIP_VISIBLE_DEVICES=5 python benchmark_gqa.py --kernel tq_decode_gqa_v1.so --sweep`
+    7. Compare 72B vs 4B performance (target: ratio close to 1.0x)
+
+    ## Current Baseline Performance
+    ```
+    4B  (B=100,Hq=32,Hkv=8,s=512)     133.8us  1.00x
+    72B (B=100,Hq=64,Hkv=8,s=512)     241.9us  1.81x  ← target: ~134us
+    72B (B=200,Hq=64,Hkv=8,s=512)     514.1us  3.84x  ← target: ~268us
+    ```
+
+    ## Important
+    - Always prefix GPU commands with `HIP_VISIBLE_DEVICES=5`
+    - Working directory is `/home/jiangyon/vllm_turboquant`
+    - hipcc --offload-arch=gfx950 (NOT gfx942)
+    - The launcher function signature MUST match v52 exactly (same parameters)
+    - The kernel must work for ANY kv_group_size (4 or 8), not hardcoded
+
+  format_error_template: |
+    Please provide a THOUGHT section followed by exactly one tool call.
+
+repo: /home/jiangyon/vllm_turboquant
+test_command: |
+  HIP_VISIBLE_DEVICES=5 python3 benchmark_gqa.py --kernel tq_decode_gqa_v1.so --ref tq_decode_stage1_v52.so --check --sweep
+metric: "Extract us/call for 72B B=100 Hq=64 (lower is better). Target: < 134us"
+
+tools:
+  profiling: false
+  profiling_type: profiling
+  strategy_manager: true

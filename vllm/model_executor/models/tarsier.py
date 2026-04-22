@@ -19,13 +19,12 @@ from transformers.models.llava import LlavaProcessor
 from transformers.processing_utils import ProcessingKwargs, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -34,10 +33,8 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
@@ -329,29 +326,9 @@ class TarsierMultiModalProcessor(BaseMultiModalProcessor[_I_Tarsier]):
         ]
 
 
-def _build_tarsier_hf_info(ctx: InputProcessingContext) -> TarsierProcessingInfo:
-    return TarsierProcessingInfo(ctx)
-
-
-def _build_tarsier_hf_processor(
-    info: _I_Tarsier,
-    dummy_inputs: BaseDummyInputsBuilder[_I_Tarsier],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    if isinstance(info, TarsierProcessingInfo):
-        return TarsierMultiModalProcessor(
-            info,
-            dummy_inputs,
-            cache=cache,
-        )
-    raise NotImplementedError(type(info))
-
-
 def init_vision_tower_for_tarsier(
     hf_config: TarsierHfConfig,  # Use the Tarsier specific config protocol
     quant_config: QuantizationConfig | None,
-    multimodal_config: MultiModalConfig | None,
     *,
     require_post_norm: bool | None = None,
     prefix: str = "",
@@ -378,7 +355,6 @@ def init_vision_tower_for_tarsier(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_to_init,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -387,7 +363,6 @@ def init_vision_tower_for_tarsier(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_to_init,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -398,8 +373,8 @@ def init_vision_tower_for_tarsier(
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_tarsier_hf_processor,
-    info=_build_tarsier_hf_info,
+    TarsierMultiModalProcessor,
+    info=TarsierProcessingInfo,
     dummy_inputs=TarsierDummyInputsBuilder,
 )
 class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
@@ -420,7 +395,6 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
         config: TarsierHfConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config  # Storing the Tarsier-specific HF config
 
@@ -428,7 +402,6 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             self.vision_tower = init_vision_tower_for_tarsier(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -590,7 +563,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

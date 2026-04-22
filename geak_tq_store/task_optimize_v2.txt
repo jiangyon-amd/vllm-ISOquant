@@ -1,0 +1,57 @@
+Optimize the fused HIP TQ Store kernel at geak_tq_store/hip_kernel/tq_store_fused_v1.hip.
+
+## Current Performance (v1 baseline)
+- N=2, H=2:   33us (good, but can we get to <20us?)
+- N=8192, H=8: 249us (bottleneck is GEMV compute, 65536 wavefronts)
+
+## Optimization Ideas to Try
+
+### 1. Vectorized PiT loads (for GEMV)
+The inner GEMV loop loads PiT[i][d0] and PiT[i][d1] with scalar loads.
+Use float2 vectorized loads: `*reinterpret_cast<const float2*>(&PiT[i*D + d0])`
+This halves the number of global memory loads.
+
+### 2. Register-blocked GEMV
+Instead of 1 loop iteration per input dim, process 2 or 4 input dims per iteration.
+```cpp
+for (int i = 0; i < D; i += 2) {
+    float xi0 = shared_x[i]; float xi1 = shared_x[i+1];
+    float2 p0 = *(float2*)&PiT[(i)*D + d0];
+    float2 p1 = *(float2*)&PiT[(i+1)*D + d0];
+    y0 += xi0 * p0.x + xi1 * p1.x;
+    y1 += xi0 * p0.y + xi1 * p1.y;
+}
+```
+
+### 3. PiT in LDS
+The PiT matrix is 128×128 = 16384 floats = 64KB. This exactly fits LDS!
+Instead of reading from global memory 128 times (once per output dim),
+load PiT into LDS cooperatively, then access from LDS (much lower latency).
+But 64KB may be too tight. Consider loading PiT row-by-row as needed.
+
+### 4. Multi-wavefront blocks for large NH
+For N=8192, H=8: NH=65536 wavefronts. With 304 CUs × 4 SIMDs = 1216 wavefronts max concurrent.
+Consider using 2-4 wavefronts per block to share PiT data via LDS.
+
+### 5. Eliminate unnecessary LDS sync for shared_x
+For a single wavefront block, all 64 threads are in the same wavefront.
+`__syncthreads()` can be replaced with `__builtin_amdgcn_wave_barrier()` or no barrier at all
+(wavefront executes in lockstep).
+
+### 6. Precompute scale reciprocal for value quant
+After computing v_scale, compute inv_scale once and reuse (but must match Triton precision).
+
+## Build and Test
+```bash
+cd /home/jiangyon/vllm_turboquant/geak_tq_store/hip_kernel
+hipcc --offload-arch=gfx950 -shared -fPIC -O3 -o tq_store_fused.so tq_store_fused_v1.hip
+cd /home/jiangyon/vllm_turboquant
+HIP_VISIBLE_DEVICES=4 python geak_tq_store/benchmark_hip_store.py --correctness
+HIP_VISIBLE_DEVICES=4 python geak_tq_store/benchmark_hip_store.py --sweep
+```
+
+## Correctness: KV cache bytes must match the reference (100% byte-level match required)
+
+## Target
+- N=2, H=2:    <20us
+- N=8192, H=8: <150us

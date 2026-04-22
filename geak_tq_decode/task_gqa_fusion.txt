@@ -1,0 +1,101 @@
+Optimize the TQ Decode HIP kernel by implementing GQA (Grouped Query Attention) fusion.
+
+## Problem
+Current kernel: Grid (B, Hq, NUM_KV_SPLITS) — each Q head independently reads KV cache.
+For 72B model (Hq=64, Hkv=8, GQA ratio=8:1), the SAME KV head is read 8 times!
+This is the #1 bottleneck: 8x redundant KV cache reads.
+
+## Goal
+New kernel: Grid (B, Hkv, NUM_KV_SPLITS) — each threadgroup reads KV cache ONCE,
+then computes attention for ALL Q heads that share this KV head (8 Q heads).
+
+### Target Performance
+Current: ~1.135ms per request attention time (measured at batch=300, seq=2048+512)
+Target: < 0.378ms per request (3x speedup) — needed to make TQ throughput > Baseline
+
+### Current Kernel Architecture (v52 — tq_decode_stage1_v52.hip)
+```
+Grid: (B, Hq, NUM_KV_SPLITS)    // Hq=64 for 72B → 64 threadgroups per (B, split)
+Block: 64 threads (32 threads × 2 warps)
+Each thread: 4 dims (128 / 32 = 4)
+
+Per threadgroup:
+  1. Load q_rot[bid, hid, :] → 4 floats per thread (128 dims total)
+  2. For each KV token in split:
+     a. Load MSE indices from kv_cache (uint16 per thread pair) 
+     b. Centroid gather: c0-c3 from LDS centroids[16]
+     c. Dot product: score = sum(q * c) via wave_sum32
+     d. Norm: score *= rsqrt(norm_sq) * vec_norm * attn_scale
+     e. Online softmax: update max, sum_exp, rescale
+     f. Load value (uint16 → 4-bit unpack → dequant)
+     g. Accumulate: acc += p * v
+  3. Cross-warp reduction (2 warps → 1)
+  4. Write mid_o[bid, hid, sid, :D+1]
+```
+
+### GQA Fusion Design
+```
+Grid: (B, Hkv, NUM_KV_SPLITS)   // Hkv=8 → 8 threadgroups per (B, split) — 8x fewer!
+Block: 256 threads (32 threads × 8 warps, one warp per Q head)
+
+Per threadgroup:
+  1. Load 8 q_rot vectors (one per Q head in this KV group) → LDS or registers
+  2. For each KV token in split:
+     a. Load MSE indices ONCE (shared across all 8 Q heads)     ← KEY SAVING
+     b. Centroid gather ONCE
+     c. 8 dot products: score_g = sum(q_g * c) for g=0..7
+     d. 8 norms, 8 online softmax updates
+     e. Load value ONCE (shared)                                 ← KEY SAVING
+     f. 8 accumulations: acc_g += p_g * v for g=0..7
+  3. Cross-warp reduction within each Q head group
+  4. Write mid_o[bid, hid_base + g, sid, :D+1] for g=0..7
+```
+
+### Key Implementation Details
+- kv_group_size = Hq / Hkv (8 for 72B, 4 for 4B)
+- Each warp handles ONE Q head within the KV group
+- KV cache loads are done by ONE warp then broadcast via LDS to all 8 warps
+- Or: all warps load the same KV data independently (simpler, relies on L1 cache)
+- The inner loop body is identical to v52 for the per-Q-head computation
+- Only the KV load is shared/amortized
+
+### Simplest Approach (recommended to start)
+Keep the v52 inner loop structure. Just change:
+1. Grid z-dim: Hq → Hkv
+2. Each block: 8 warps (one per Q head in group), NOT 2 warps
+3. Each warp loads its own Q head's query
+4. In the KV loop: each warp reads the SAME KV bytes (L1 cache handles sharing)
+5. No cross-warp reduction needed (each warp produces its own Q head's output)
+6. Write: mid_o[bid, kv_head * kv_group_size + warp_id, sid, :]
+
+This gives 8x fewer blocks, 8x fewer KV reads from HBM. Even without LDS sharing,
+L1 cache should serve the repeated KV reads efficiently.
+
+### More Aggressive: LDS KV Sharing  
+One "leader" warp loads KV data into LDS. Other 7 warps read from LDS.
+This guarantees single HBM read but adds LDS capacity/latency considerations.
+
+## Build and Test
+```bash
+cd /home/jiangyon/vllm_turboquant/geak_tq_decode/hip_kernel
+hipcc --offload-arch=gfx950 -shared -fPIC -O3 -ffast-math -o tq_decode_stage1_v52.so tq_decode_stage1_v52.hip
+HIP_VISIBLE_DEVICES=5 python benchmark_gqa.py
+```
+
+## Correctness
+The fused kernel output must match the current v52 output within atol=1e-2.
+
+## Benchmark
+The benchmark_gqa.py tests with 72B config: B=100, Hq=64, Hkv=8, seq_len=512.
+Current v52 performance: ~113us for (B=100, Hq=32, Hkv=8) 4B config.
+With 72B config (Hq=64): expected ~226us (2x more Q heads).
+Target: < 113us (same as 4B, since KV reads are the same with GQA fusion).
+
+## IMPORTANT
+- Start from v52 kernel (the current best)
+- Keep all v52 optimizations (uint16 MSE load, wave_sum32, FMA, etc.)
+- Compile with hipcc --offload-arch=gfx950 (NOT gfx942)
+- Use HIP_VISIBLE_DEVICES=5 for testing
+- The launcher must accept hipStream_t as the last parameter
+- kv_group_size is passed as a parameter (8 for 72B, 4 for 4B)
+- The kernel MUST work for both kv_group_size=4 and kv_group_size=8

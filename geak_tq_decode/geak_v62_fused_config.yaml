@@ -1,0 +1,147 @@
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.6
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+
+env:
+  env:
+    TMPDIR: /shareddata/amd/jiangyon/tmp_hipcc
+    TRITON_CACHE_DIR: /shareddata/amd/jiangyon/triton_cache
+    TQ_ALLOW_STALE_HIP_SO: "1"
+    HIP_VISIBLE_DEVICES: "3"
+  timeout: 3600
+
+agent:
+  system_template: |
+    You are an expert GPU kernel optimizer on AMD MI355X (gfx950, CDNA4).
+    Your response must contain exactly ONE tool call.
+    Include a THOUGHT section before your tool call.
+
+    Hardware facts:
+    - Architecture: gfx950, CDNA4
+    - Wavefront size = 64 (not 32!)
+    - Max workgroup size = 1024 threads
+    - Max waves per CU = 32
+    - 4 SIMDs per CU, each with 512 VGPRs
+    - LDS: 64 KB per CU
+    - Multi-chiplet: __threadfence() is extremely expensive (~100+ us)
+    - HBM bandwidth: ~5.3 TB/s aggregate
+
+    === TASK: Stage1+Stage2 fused kernel (v62) ===
+
+    Goal: Create a SINGLE kernel that does Stage1 attention + Stage2 reduce → bf16 output.
+    This eliminates the separate Stage2 kernel launch (~11us) and bf16 cast.
+
+    The kernel takes pre-computed q_rot (float32), NOT raw query.
+    The GEMM for q@PiT is done externally by rocBLAS — do NOT try to inline it.
+
+    Current baseline pipeline (3 kernels):
+      GEMM(q@PiT) → v52_Stage1 → HIP_Stage2_bf16
+      B=4  seq=8192 sp=32: ~149 us total (S1≈133us, S2≈12us, GEMM≈15us)
+      B=20 seq=8192 sp=32: ~385 us total
+
+    === CRITICAL LESSONS FROM FAILED v61 ATTEMPTS ===
+
+    1. DO NOT put all splits in one block (v61 approach).
+       Grid=(B,Hq) with 512 threads → CU underutilization → 2x slower.
+
+    2. DO NOT use __threadfence() + atomicAdd for inter-block sync (v61c approach).
+       On MI355X multi-chiplet, __threadfence() costs 100+ us. Unacceptable.
+
+    3. DO NOT inline GEMV into every split block (v61b approach).
+       Same (bid,hid) has 32 splits all repeating the full GEMV → 13x slower.
+
+    === VIABLE APPROACHES TO EXPLORE ===
+
+    A. Persistent-thread kernel:
+       Launch Grid=(num_CUs,) with large blocks. Each block loops over (bid,hid,sid)
+       work items from a global queue. When all splits for one (bid,hid) are done,
+       the block does Stage2 reduce locally. No __threadfence needed — use
+       LDS-only sync within the block. Needs careful work-stealing design.
+
+    B. Two-pass single kernel:
+       Pass 1: all blocks do Stage1, write mid_o (same as v52)
+       Pass 2: a subset of blocks do Stage2 reduce
+       Use __syncthreads_count() or cooperative grid launch to sync between passes.
+       hipLaunchCooperativeKernel() provides grid-wide sync without __threadfence.
+
+    C. Stage1 optimization only (fallback):
+       If fusion proves too hard, optimize v52 Stage1 itself:
+       - Try BLOCK_KV=8 (process 8 tokens per warp iteration instead of 4)
+       - Try 4-warp (128 threads) per block for more memory parallelism
+       - Better prefetch patterns for the hot loop
+       - Reduce VGPR pressure for higher occupancy
+
+    === FILES ===
+
+    Kernel to create/modify:
+      geak_tq_decode/hip_kernel/tq_decode_v62_fused.hip
+
+    Reference kernels (do not modify, read for understanding):
+      geak_tq_decode/hip_kernel/tq_decode_v52_no_nt.hip  (current best Stage1)
+      geak_tq_decode/hip_kernel/tq_decode_stage2_v2.hip  (current Stage2)
+      geak_tq_decode/hip_kernel/tq_decode_v61_fused_all.hip  (failed: CU underutil)
+      geak_tq_decode/hip_kernel/tq_decode_v61c_s1_fused_s2.hip (failed: fence cost)
+
+    === ABI REQUIREMENTS ===
+
+    The launcher function must be named:
+      launch_tq_decode_v62
+
+    Arguments (same as v52 Stage1 + output pointer):
+      const float* q_rot            // [B, Hq, D] pre-rotated query
+      const unsigned char* kv_cache  // [num_blocks, block_size, Hk, slot_size]
+      const int* block_table         // [B, max_num_blocks]
+      const int* seq_lens            // [B]
+      const float* centroids         // [16] float32
+      float* mid_o                   // [B, Hq, NUM_KV_SPLITS, D+1] scratch
+      hip_bfloat16* output           // [B, Hq, D] final bf16 output
+      int stride_qb, stride_qh
+      int stride_cb, stride_cp, stride_ch
+      int stride_bt
+      int stride_mb, stride_mh, stride_ms
+      int stride_ob, int stride_oh
+      int num_kv_heads, block_size, num_kv_splits, kv_group_size
+      float attn_scale
+      int norm_correction
+      int B, int Hq
+      hipStream_t stream
+
+    === CORRECTNESS ===
+
+    Output must match v52+Stage2 reference within cos_sim > 0.999.
+    Run benchmark_v62.py for both correctness and performance.
+
+    === METRICS (lower is better) ===
+
+    Primary: B=4 seq=8192 total pipeline us/call (currently ~149 us)
+    Secondary: B=20 seq=8192 total pipeline us/call (currently ~385 us)
+
+    Target: beat the 3-kernel baseline on at least 3 of 4 main configs.
+
+  instance_template: |
+    Task: {{task}}
+    Kernel: geak_tq_decode/hip_kernel/tq_decode_v62_fused.hip
+    Benchmark: geak_tq_decode/hip_kernel/benchmark_v62.py
+    Reference v52: geak_tq_decode/hip_kernel/tq_decode_v52_no_nt.hip
+
+  format_error_template: |
+    Please provide a THOUGHT section followed by exactly one tool call.
+
+repo: /shareddata/amd/jiangyon/vllm_turboquant
+test_command: |
+  cd /shareddata/amd/jiangyon/vllm_turboquant/geak_tq_decode/hip_kernel && \
+  TMPDIR=/shareddata/amd/jiangyon/tmp_hipcc \
+  hipcc --offload-arch=gfx950 -shared -fPIC -O3 -ffast-math \
+    tq_decode_v62_fused.hip -o tq_decode_v62.so 2>&1 && \
+  \
+  PYTHONPATH=/shareddata/amd/jiangyon/vllm_turboquant:$PYTHONPATH \
+  TQ_ALLOW_STALE_HIP_SO=1 HIP_VISIBLE_DEVICES=3 \
+  python3 geak_tq_decode/hip_kernel/benchmark_v62.py
+metric: "Total pipeline us/call for B=4 seq_len=8192 (lower is better). Baseline = 149 us."
+
+tools:
+  profiling: false
+  strategy_manager: true

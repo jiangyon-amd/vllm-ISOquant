@@ -1,0 +1,99 @@
+Optimize the TQ Store pipeline by fusing ALL operations into a single HIP kernel.
+
+## Current Implementation (5 separate kernel launches per call)
+
+The TQ store for MSE-quantized 4-bit keys (turboquant_4bit_nc) currently does:
+```python
+# In triton_turboquant_store() — MSE PATH (line 580-618):
+k_flat = key.float().reshape(NH, D)         # Launch 1: bf16→fp32 cast
+norms = k_flat.norm(dim=1, keepdim=True)     # Launch 2: L2 norm reduction  
+y = torch.mm(k_flat, PiT)                   # Launch 3: GEMM rotation (NH×128) @ (128×128)
+y = y / (norms + 1e-8)                      # Launch 4: element-wise normalize
+y = y.contiguous()
+v_flat = value.float().reshape(NH, D)        # (reuses Launch 1 cast kernel)
+_tq_fused_store_mse[grid](...)               # Launch 5: Triton bucketize + pack + value quant
+```
+
+### Benchmark Results (per layer, N=2 tokens, H=2 KV heads — 72B TP=4 decode):
+- Step 1 (cast+reshape): ~60us
+- Step 2 (norm):         ~31us  
+- Step 3 (GEMM k@PiT):  ~31us
+- Step 4 (normalize):    ~55us
+- Step 5 (Triton):       ~30us
+- FULL pipeline:         ~220us
+- **TOTAL × 80 layers = 17.6ms per decode step** (significant fraction of 52ms TPOT)
+
+## Goal: Single Fused HIP Kernel
+
+Write ONE HIP kernel that replaces ALL 5 steps. Grid: (NH,) — one wavefront per (token, head).
+
+### Kernel Algorithm (for each token-head pair):
+```
+Input: key[D] (bf16), value[D] (bf16), PiT[D×D] (fp32), centroids[16] (fp32), midpoints[15] (fp32)
+Output: packed KV cache slot (uint8 bytes)
+
+1. Load key[D] as bf16, cast to fp32
+2. Compute L2 norm: vec_norm = sqrt(sum(key[i]^2))
+3. Compute x_hat = key / (vec_norm + 1e-8)  (normalize)
+4. Compute y = x_hat @ PiT  (matrix-vector multiply, D=128 → 128 FMA per output dim)
+5. Bucketize y into centroid indices using midpoints (15 comparisons per dim)
+6. Gather centroids, compute residual norm gamma
+7. Pack 4-bit indices into bytes (2 indices per byte)
+8. Store vec_norm and gamma as fp16
+9. Load value[D], compute min/max, uniform quantize to 4-bit, pack
+10. Store scale/zero as fp16
+```
+
+### HIP Kernel Design for MI300X (gfx942):
+- **Wavefront: 64 threads** — each thread handles D/64 = 2 dimensions
+- **LDS**: Store PiT columns needed for the dot product (or use register tiling)
+- **Key optimization**: The GEMM (step 4) is a matrix-vector product per token-head. 
+  For D=128: each output dim needs 128 FMAs. With 64 threads, each thread computes 2 output dims.
+  Use wave-level reduction (ds_swizzle / wave_reduce) for the dot products.
+- **Centroids**: Only 16 floats = 64 bytes → fit in registers
+- **Midpoints**: Only 15 floats = 60 bytes → fit in registers
+
+### Target Performance:
+- Current: ~220us (5 kernel launches, dominated by launch overhead)
+- Target: <50us (single kernel, eliminate 4 redundant launches and intermediate memory)
+- For decode (N=2, H=2, NH=4): just 4 wavefronts of work — launch overhead is everything
+
+### Important Parameters:
+- D = 128 (head_dim, fixed)
+- MSE_BITS = 4 (4-bit quantization, 16 centroids)
+- VQB = 4 (4-bit value quantization)
+- key_packed_size = 68 bytes (64 MSE indices + 4 norm bytes)
+- val_data_bytes = 64 bytes (128 dims × 4 bits / 8)
+- value_packed_size = 68 bytes (64 data + 4 scale/zero)
+- slot_size = 136 bytes total per head per position
+
+### Files:
+- **Kernel to write**: `geak_tq_store/hip_kernel/tq_store_fused_v1.hip`
+- **Benchmark**: `geak_tq_store/benchmark_tq_store.py` — `python geak_tq_store/benchmark_tq_store.py --breakdown --H 2`
+- **Correctness test**: `geak_tq_store/test_correctness.py`
+- **Reference Triton**: `vllm/v1/attention/ops/triton_turboquant_store.py`
+  - `_tq_fused_store_mse` (line 229): the Triton kernel to match
+  - `triton_turboquant_store` (line 515): the launcher to replace
+
+### Integration Plan:
+After the HIP kernel works, it will be loaded in `triton_turboquant_store()` as an alternative 
+to the current 5-step pipeline, similar to how `_load_hip_stage1()` loads the decode HIP kernel.
+
+### Build and Test:
+```bash
+cd /home/jiangyon/vllm_turboquant/geak_tq_store/hip_kernel
+hipcc --offload-arch=gfx942 -shared -fPIC -O3 -ffast-math -o tq_store_fused.so tq_store_fused_v1.hip
+HIP_VISIBLE_DEVICES=4 python geak_tq_store/test_correctness.py
+HIP_VISIBLE_DEVICES=4 python geak_tq_store/benchmark_tq_store.py --breakdown --H 2
+```
+
+### CRITICAL CORRECTNESS REQUIREMENTS:
+1. The KV cache byte layout MUST be identical to what the current Triton kernel produces
+2. The decode kernel reads from this cache — any layout mismatch breaks decoding
+3. Cache layout per slot (136 bytes):
+   - Bytes [0:64]: 4-bit MSE key indices (2 per byte, low nibble first)
+   - Bytes [64:66]: vec_norm as float16 (little-endian)
+   - Bytes [66:68]: gamma (residual norm) as float16 (little-endian)
+   - Bytes [68:132]: 4-bit value data (2 per byte, low nibble first)  
+   - Bytes [132:134]: value scale as float16 (little-endian)
+   - Bytes [134:136]: value zero-point as float16 (little-endian)

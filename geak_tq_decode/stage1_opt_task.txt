@@ -1,0 +1,1 @@
+Optimize the Stage1 attention kernel in tq_decode_v52_no_nt.hip to reduce latency. The kernel is memory-bandwidth bound. Target: reduce B=4 seq=8192 from 204us. Try BLOCK_KV=8, or 4 half-warps (128 threads), or better prefetch patterns. Keep ABI unchanged.

@@ -10,10 +10,13 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
+
+logger = init_logger(__name__)
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -302,8 +305,9 @@ def chunked_prefill_paged_decode(
     block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
-    num_kv_heads = key.shape[1]
-    num_queries_per_kv = query.shape[1] // key.shape[1]
+    # key may be None in cross-attention decode (already cached from encoder)
+    num_kv_heads = key.shape[1] if key is not None else key_cache.shape[1]
+    num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = query.shape[2]
 
     # Conversion of FP8 Tensor from uint8 storage to
@@ -391,6 +395,10 @@ def chunked_prefill_paged_decode(
             fp8_out_scale=output_scale,
         )
     else:
+        logger.warning_once(
+            "Cannot use ROCm custom paged attention kernel,"
+            " falling back to Triton implementation."
+        )
         real_block_size = value_cache.shape[3]
         # The standard model directly uses the original block_size.
         # Non-standard 544 uses 32 to accommodate integer division logic.
