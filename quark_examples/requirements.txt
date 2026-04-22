@@ -1,0 +1,16 @@
+evaluate
+joblib
+ninja
+numpy<=2.1.3
+onnx>=1.16.0,<=1.19.0
+onnxscript
+onnxslim>=0.1.77
+pandas
+plotly
+protobuf
+pydantic
+rich
+scipy
+sentencepiece
+tqdm
+zstandard

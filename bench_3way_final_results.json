@@ -1,0 +1,186 @@
+{
+  "RTN": {
+    "round1": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.798,
+        "tps": 71.2,
+        "preview": "<think>\nOkay, so I need to explain the theory of relativity in simple terms. Let me start by recalli"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.804,
+        "tps": 71.0,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.793,
+        "tps": 71.4,
+        "preview": "<think>\nOkay, so I need to explain the main differences between TCP and UDP protocols. Let me start "
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.795,
+        "tps": 71.3,
+        "preview": "<think>\nOkay, so I need to describe the process of photosynthesis step by step. Let me start by reca"
+      },
+      {
+        "prompt": "What causes earthquakes and how are they measured?",
+        "tokens": 128,
+        "time": 1.797,
+        "tps": 71.2,
+        "preview": "<think>\nOkay, so I need to figure out what causes earthquakes and how they're measured. Let me start"
+      },
+      {
+        "prompt": "Explain how a neural network learns from data.",
+        "tokens": 128,
+        "time": 1.795,
+        "tps": 71.3,
+        "preview": "<think>\nOkay, the user wants me to explain how a neural network learns from data. Let me start by re"
+      }
+    ],
+    "round2": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.797,
+        "tps": 71.2,
+        "preview": "<think>\nOkay, so I need to explain the theory of relativity in simple terms. Let me start by recalli"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.792,
+        "tps": 71.4,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.795,
+        "tps": 71.3,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.802,
+        "tps": 71.0,
+        "preview": "<think>\nOkay, so I need to describe the process of photosynthesis step by step. Let me start by reca"
+      },
+      {
+        "prompt": "What causes earthquakes and how are they measured?",
+        "tokens": 128,
+        "time": 1.795,
+        "tps": 71.3,
+        "preview": "<think>\nOkay, so I need to explain what causes earthquakes and how they're measured. Let me start wi"
+      },
+      {
+        "prompt": "Explain how a neural network learns from data.",
+        "tokens": 128,
+        "time": 1.798,
+        "tps": 71.2,
+        "preview": "<think>\nOkay, so I need to explain how a neural network learns from data. Let me start by recalling "
+      }
+    ],
+    "avg_tps": 71.23333333333333,
+    "correct": true
+  },
+  "Separated": {
+    "round1": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.969,
+        "tps": 65.0,
+        "preview": "<think>\nOkay, so I need to explain the theory of relativity in simple terms. Let me start by recalli"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.964,
+        "tps": 65.2,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.973,
+        "tps": 64.9,
+        "preview": "<think>\nOkay, so I need to explain the main differences between TCP and UDP protocols. Let me start "
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.969,
+        "tps": 65.0,
+        "preview": "<think>\nOkay, so I need to describe the process of photosynthesis step by step. Let me start by reca"
+      },
+      {
+        "prompt": "What causes earthquakes and how are they measured?",
+        "tokens": 128,
+        "time": 1.973,
+        "tps": 64.9,
+        "preview": "<think>\nOkay, so I need to explain what causes earthquakes and how they're measured. Let me start wi"
+      },
+      {
+        "prompt": "Explain how a neural network learns from data.",
+        "tokens": 128,
+        "time": 1.971,
+        "tps": 64.9,
+        "preview": "<think>\nOkay, so I need to explain how a neural network learns from data. Let me start by recalling "
+      }
+    ],
+    "round2": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.983,
+        "tps": 64.6,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.971,
+        "tps": 64.9,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.975,
+        "tps": 64.8,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Hmm, I rem"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.97,
+        "tps": 65.0,
+        "preview": "<think>\nOkay, I need to describe the process of photosynthesis step by step. Let me start by recalli"
+      },
+      {
+        "prompt": "What causes earthquakes and how are they measured?",
+        "tokens": 128,
+        "time": 1.966,
+        "tps": 65.1,
+        "preview": "<think>\nOkay, so the user is asking about what causes earthquakes and how they're measured. Let me s"
+      },
+      {
+        "prompt": "Explain how a neural network learns from data.",
+        "tokens": 128,
+        "time": 1.966,
+        "tps": 65.1,
+        "preview": "<think>\nOkay, so I need to explain how a neural network learns from data. Let me start by recalling "
+      }
+    ],
+    "avg_tps": 64.91666666666667,
+    "correct": true
+  }
+}

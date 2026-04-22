@@ -1,0 +1,662 @@
+#
+# Modifications copyright (C) 2023, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
+import copy
+from typing import Any
+
+import numpy as np
+import onnx
+import onnx.numpy_helper
+from onnx import ModelProto, TensorProto
+from onnxruntime.quantization.onnx_model import ONNXModel
+from onnxruntime.quantization.qdq_quantizer import QDQTensorQuantizedValue
+from onnxruntime.quantization.quant_utils import (
+    DEQUANT_OP_NAME,
+    QUANT_OP_NAME,
+    QuantizationMode,
+    QuantizedValue,
+    QuantizedValueType,
+    add_dequant_output_suffix,
+    add_dequant_suffix,
+    add_quant_input_suffix,
+    add_quant_output_suffix,
+    add_quant_suffix,
+    find_by_name,
+    ms_domain,
+)
+
+from quark.onnx.postprocess import align_quantize_info, simulate_transforms
+from quark.onnx.quantization.quant_utils import (
+    BFP_OP_DEFAULT_ATTRS,
+    COP_BFP_OP_NAME,
+    COP_DEQUANT_OP_NAME,
+    COP_DOMAIN,
+    COP_MX_OP_NAME,
+    COP_QUANT_OP_NAME,
+    MX_OP_DEFAULT_ATTRS,
+    __producer__,
+    __version__,
+    get_annotate_tensors,
+    get_qdq_to_remove,
+    modified_annotate_input,
+    remove_nodes,
+)
+from quark.shares.utils.log import ScreenLogger
+
+from .qdq_quantizer import BaseExtendedQDQQuantizer
+from .registry import CreateNPUCnnQDQQuantizer
+
+logger = ScreenLogger(__name__)
+
+
+class ExtendedQDQQuantizer(BaseExtendedQDQQuantizer):
+    def __init__(
+        self,
+        model: ModelProto,
+        per_channel: bool,
+        reduce_range: bool,
+        mode: QuantizationMode.QLinearOps,
+        static: bool,
+        weight_qType: Any,
+        activation_qType: Any,
+        tensors_range: Any,
+        nodes_to_quantize: list[str],
+        nodes_to_exclude: list[str],
+        op_types_to_quantize: list[str],
+        calibrate_method: Any,
+        extra_options: dict[str, Any] | None = None,
+    ):
+        # These extra assignments are for mypy to determine types
+        self.calibrate_method = calibrate_method
+        self.tensors_to_quantize = {}
+        self.model = ONNXModel(model)
+        self.nodes_to_exclude = nodes_to_exclude
+
+        BaseExtendedQDQQuantizer.__init__(
+            self,
+            model,
+            per_channel,
+            reduce_range,
+            mode,
+            static,
+            weight_qType,
+            activation_qType,
+            tensors_range,
+            nodes_to_quantize,
+            nodes_to_exclude,
+            op_types_to_quantize,
+            calibrate_method,
+            extra_options,
+        )
+
+        self.fold_relu = extra_options.get("FoldRelu", False) if extra_options is not None else False
+
+    def quantize_model(self) -> Any:
+        annotate_tensors = get_annotate_tensors(self.model.model)
+
+        for node in self.model.nodes():
+            if self.should_quantize_node(node):
+                op_quantizer = CreateNPUCnnQDQQuantizer(self, node)
+                op_quantizer.quantize()
+
+                if self.dedicated_qdq_pair:
+                    for tensor_name in node.input:
+                        if tensor_name not in self.tensor_to_its_receiving_nodes:
+                            self.tensor_to_its_receiving_nodes[tensor_name] = []
+                        self.tensor_to_its_receiving_nodes[tensor_name].append(node)
+
+        self._quantize_normal_tensors()
+        self._quantize_sharing_param_tensors()
+        if self.quantize_bias and self.int32_bias and not self.weights_only:
+            self._quantize_bias_tensors()
+
+        self.remove_nodes()
+        dq_nodes_to_remove, q_nodes_to_remove, input_node_mapping = get_qdq_to_remove(
+            self.model.model, annotate_tensors
+        )
+        pruned_model = copy.deepcopy(self.model)
+        modified_annotate_input(pruned_model.model, input_node_mapping)
+        pruned_model.model = remove_nodes(pruned_model.model, dq_nodes_to_remove)
+        pruned_model.model = remove_nodes(pruned_model.model, q_nodes_to_remove)
+        try:
+            pruned_model.topological_sort()
+            logger.info("Remove QuantizeLinear & DequantizeLinear on certain operations(such as conv-relu).")
+            self.model.model = pruned_model.model
+        except Exception as e:
+            logger.warning(
+                f"Unable to remove QuantizeLinear & DequantizeLinear on certain operations(such as conv-relu). Exception: {e}"
+            )
+        if "SimulateDPU" not in self.extra_options or self.extra_options["SimulateDPU"] is True:
+            self._simulate_transforms()
+
+        if "NPULimitationCheck" not in self.extra_options or self.extra_options["NPULimitationCheck"] is True:
+            self._quantize_refine()
+
+        self._convert_qdq_nodes()
+
+        self.model.clean_initializers()
+
+        self.model.model.producer_name = __producer__
+        self.model.model.producer_version = __version__
+        if self.qdq_op_domain == ms_domain:
+            self.model.set_opset_import(ms_domain, 1)
+
+        return self.model.model
+
+    def try_replacing_upstream_output(self, upstream_output_name: str, output_name: str) -> bool:
+        """
+        if (output_name in self.quantization_params.keys() and len(
+                self.model.input_name_to_nodes()[upstream_output_name]) == 1 and
+                not self.model.is_graph_output(upstream_output_name) and
+                not self.model.is_graph_input(upstream_output_name)):
+            if upstream_output_name in self.tensors_to_quantize:
+                del self.tensors_to_quantize[upstream_output_name]
+            return True
+        """
+        # TODO : Understand the principle here and fix the issue caused by QDQRemovableActivation.
+        # As showed at onnxruntime/quantization/operators/activation.py, if activation uses asymmetric,
+        # the QDQRemovableActivation remove nodes, which caused the graph broken.
+        if (
+            self.fold_relu
+            and output_name in self.quantization_params
+            and len(self.model.input_name_to_nodes()[upstream_output_name]) == 1
+            and not self.model.is_graph_output(upstream_output_name)
+            and not self.model.is_graph_input(upstream_output_name)
+        ):
+            self.model.replace_output_of_all_nodes(upstream_output_name, output_name)
+            if upstream_output_name in self.tensors_to_quantize:
+                del self.tensors_to_quantize[upstream_output_name]
+            return True
+        return False
+
+    def _fn_name_and_attrs(self, fn_type: str) -> tuple[str, dict[str, Any]]:
+        if fn_type.endswith(COP_BFP_OP_NAME):
+            fn_name = COP_BFP_OP_NAME
+            fn_attrs = copy.deepcopy(BFP_OP_DEFAULT_ATTRS)
+            # Get attributes for custom BFP ops
+            if self.extra_options is not None and "BFPAttributes" in self.extra_options:
+                fn_attrs.update(self.extra_options["BFPAttributes"])
+        elif fn_type.endswith(COP_MX_OP_NAME):
+            fn_name = COP_MX_OP_NAME
+            fn_attrs = copy.deepcopy(MX_OP_DEFAULT_ATTRS)
+            # Get attributes for custom MX ops
+            if self.extra_options is not None and "MXAttributes" in self.extra_options:
+                fn_attrs.update(self.extra_options["MXAttributes"])
+        else:
+            raise ValueError("Unknown type {fn_type} for BFP and MX quantization")
+        return fn_name, fn_attrs
+
+    def _create_fn_nodes(
+        self,
+        q_input: Any,
+        dq_output: Any,
+        dequant_node_name: str,
+        scale_name: str,
+        zp_name: str,
+        axis: Any = None,
+        convert_to: Any = None,
+    ) -> None:
+        """
+        create a functional QuantizeDequantize node for BFP and MX quantization
+        """
+        fn_name, fn_attrs = self._fn_name_and_attrs(zp_name)
+        for key in fn_attrs:
+            if key == "axis" and isinstance(axis, int):
+                fn_attrs[key] = axis
+            if key == "convert_to_bfloat_before_bfp" and convert_to is not None:
+                fn_attrs[key] = convert_to
+
+        fn_node = onnx.helper.make_node(
+            fn_name,
+            [q_input],
+            [dq_output],
+            dequant_node_name,
+            domain=COP_DOMAIN,
+        )
+
+        for k, v in fn_attrs.items():
+            fn_node.attribute.append(onnx.helper.make_attribute(k, v))
+
+        self.model.add_nodes([fn_node])
+
+    def _create_customqdq_nodes(
+        self,
+        q_input: Any,
+        q_output: Any,
+        quant_node_name: str,
+        dq_input: Any,
+        dq_output: Any,
+        dequant_node_name: str,
+        scale_name: str,
+        zp_name: str,
+        axis: Any = None,
+    ) -> None:
+        qlinear_node = onnx.helper.make_node(
+            COP_QUANT_OP_NAME,
+            [q_input, scale_name, zp_name],
+            [q_output],
+            quant_node_name,
+            axis=axis,
+            domain=COP_DOMAIN,
+        )
+        dequant_node = onnx.helper.make_node(
+            COP_DEQUANT_OP_NAME,
+            [dq_input, scale_name, zp_name],
+            [dq_output],
+            dequant_node_name,
+            axis=axis,
+            domain=COP_DOMAIN,
+        )
+        self.model.add_nodes([qlinear_node, dequant_node])
+
+    def _add_fn_pair_for_initializer(self, weight_proto: TensorProto, tensor_type: Any, axis: Any = None) -> None:
+        weight_name = weight_proto.name
+        if axis is not None:
+            if self.opset_version < 13:
+                raise ValueError("Per-Channel support with QDQ format requires onnx opset version 13 or above.")
+            qtype = self.weight_qType
+            if self.activation_qType == onnx.onnx_pb.TensorProto.UINT8:
+                qtype = onnx.onnx_pb.TensorProto.INT8
+                logger.warning(f"The type of weight {weight_name} is forced to be TensorProto.INT8 for per_channel.")
+            q_weight_name, zp_name, scale_name = self.quantize_weight_per_channel(
+                weight_name,
+                # Quantization type is forced to be TensorProto.INT8.
+                # when the expected value would be (see below)
+                # self.weight_qType if tensor_type is QDQQuantTensorType.WEIGHT else self.activation_qType.
+                # QLinearConv expects to have a unique value for all channels.
+                # This code does not enforce that but it is necessarily the case when the
+                # quantization is symmetric (as for INT8).
+                qtype,
+                axis,
+                keep_float_weight=self.add_qdq_pair_to_weight,
+            )
+        else:
+            q_weight_name, zp_name, scale_name = self.quantize_initializer(
+                weight_proto,
+                self.weight_qType,
+                keep_float_weight=self.add_qdq_pair_to_weight,
+            )
+
+        weight_dequant_output = add_dequant_output_suffix(weight_name)
+        self.model.replace_input_of_all_nodes(weight_name, weight_dequant_output)
+        if scale_name.endswith((COP_BFP_OP_NAME, COP_MX_OP_NAME)):
+            self._create_fn_nodes(
+                weight_name,
+                weight_dequant_output,
+                add_dequant_suffix(weight_name),
+                scale_name,
+                zp_name,
+                axis=0 if len(weight_proto.dims) <= 1 else None,
+                convert_to=0,  # Initializer is a constant, no conversion required
+            )
+        elif self.add_qdq_pair_to_weight:
+            weight_quant_output = add_quant_output_suffix(weight_name)
+            self._create_customqdq_nodes(
+                weight_name,
+                weight_quant_output,
+                add_quant_suffix(weight_name),
+                weight_quant_output,
+                weight_dequant_output,
+                add_dequant_suffix(weight_name),
+                scale_name,
+                zp_name,
+                axis,
+            )
+        else:
+            dequant_node = onnx.helper.make_node(
+                COP_DEQUANT_OP_NAME,
+                [q_weight_name, scale_name, zp_name],
+                [weight_dequant_output],
+                add_dequant_suffix(weight_name),
+                axis=axis,
+                domain=COP_DOMAIN,
+            )
+            self.model.add_node(dequant_node)
+
+    def _add_fn_pair_for_activation(
+        self, tensor_name: str, scale_name: str, zp_name: str, data_type: Any = None
+    ) -> Any:
+        if (
+            self.dedicated_qdq_pair
+            and tensor_name in self.tensor_to_its_receiving_nodes
+            and len(self.tensor_to_its_receiving_nodes[tensor_name]) > 1
+        ):
+            num_dedicated_qdq_pair = len(self.tensor_to_its_receiving_nodes[tensor_name])
+            for i in range(num_dedicated_qdq_pair):
+                postfix = f"_{i + 1}"
+                tensor_name_quant_output_postfix = add_quant_output_suffix(tensor_name) + postfix
+                tensor_name_dequant_output_postfix = add_dequant_output_suffix(tensor_name) + postfix
+                quant_node_name_postfix = add_quant_suffix(tensor_name) + postfix
+                dequant_node_name_postfix = add_dequant_suffix(tensor_name) + postfix
+                if scale_name.endswith((COP_BFP_OP_NAME, COP_MX_OP_NAME)):
+                    self._create_fn_nodes(
+                        tensor_name,
+                        tensor_name_dequant_output_postfix,
+                        dequant_node_name_postfix,
+                        scale_name,
+                        zp_name,
+                    )
+                else:
+                    self._create_customqdq_nodes(
+                        tensor_name,
+                        tensor_name_quant_output_postfix,
+                        quant_node_name_postfix,
+                        tensor_name_quant_output_postfix,
+                        tensor_name_dequant_output_postfix,
+                        dequant_node_name_postfix,
+                        scale_name,
+                        zp_name,
+                    )
+
+                node = self.tensor_to_its_receiving_nodes[tensor_name][i]
+                self.model.replace_node_input(node, tensor_name, tensor_name_dequant_output_postfix)
+                if i == 0:
+                    quantized_value = QuantizedValue(
+                        tensor_name,
+                        tensor_name_dequant_output_postfix,
+                        scale_name,
+                        zp_name,
+                        QuantizedValueType.Input,
+                        scale_type=data_type,
+                    )
+                    self.quantized_value_map[tensor_name] = QDQTensorQuantizedValue(quantized_value, None, None)
+        else:
+            q_input = tensor_name
+            dq_output = add_dequant_output_suffix(tensor_name)
+            if self.model.is_graph_output(tensor_name):
+                q_input = add_quant_input_suffix(tensor_name)
+                dq_output = tensor_name
+                self.model.replace_output_of_all_nodes(tensor_name, q_input)
+            else:
+                self.model.replace_input_of_all_nodes(tensor_name, dq_output)
+
+            if scale_name.endswith((COP_BFP_OP_NAME, COP_MX_OP_NAME)):
+                self._create_fn_nodes(
+                    q_input,
+                    dq_output,
+                    add_dequant_suffix(tensor_name),
+                    scale_name,
+                    zp_name,
+                )
+            else:
+                self._create_customqdq_nodes(
+                    q_input,
+                    add_quant_output_suffix(tensor_name),
+                    add_quant_suffix(tensor_name),
+                    add_quant_output_suffix(tensor_name),
+                    dq_output,
+                    add_dequant_suffix(tensor_name),
+                    scale_name,
+                    zp_name,
+                )
+
+            quantized_value = QuantizedValue(
+                tensor_name,
+                dq_output,
+                scale_name,
+                zp_name,
+                QuantizedValueType.Input,
+                scale_type=data_type,
+            )
+            self.quantized_value_map[tensor_name] = QDQTensorQuantizedValue(quantized_value, None, None)
+
+    def _quantize_normal_tensors(self) -> None:
+        for tensor_name, tensor_info in self.tensors_to_quantize.copy().items():
+            if tensor_name in self.quantized_value_map:
+                continue
+
+            if not tensor_info.is_shared:
+                # Quantize the input
+                initializer = find_by_name(tensor_name, self.model.initializer())
+                if initializer:
+                    # Below is a special treatment for bfloat16 to avoid the NaN issue due to overflow
+                    if self.weight_qType == TensorProto.BFLOAT16:
+                        weight = onnx.numpy_helper.to_array(initializer)
+                        # clip weight to the range of BFLOAT16 [1.17549435e-38, 3.38953139e38]
+                        if np.max(np.abs(weight)) > 3.38953139e38 or np.min(np.abs(weight)) < 1.17549435e-38:
+                            original_weight = weight
+                            weight = (
+                                np.sign(original_weight)
+                                * np.clip(np.abs(original_weight), 1.17549435e-38, 3.38953139e38)
+                            ).astype(original_weight.dtype)
+                            logger.info(
+                                f"The original weight of {tensor_name}: {original_weight} has been clipped to "
+                                f"new weight: {weight} because it is out of BFLOAT16 boundary."
+                            )
+                        initializer_new = onnx.numpy_helper.from_array(weight, name=initializer.name)
+                        initializer.CopyFrom(initializer_new)
+
+                    self._add_fn_pair_for_initializer(initializer, tensor_info.tensor_type, tensor_info.axis)
+                else:
+                    tensor_qparam_initializers = self._make_tensor_scale_zp_initializers(tensor_name)
+                    if not tensor_qparam_initializers:
+                        raise ValueError(
+                            f"Quantization parameters are not specified for param {tensor_name}. "
+                            "In static mode quantization params for inputs and outputs of nodes to be quantized are required."
+                        )
+                    if tensor_qparam_initializers.converted is None:
+                        # Normal case: <producer> --> Q --> DQ --> <consumers>
+                        self._add_fn_pair_for_activation(
+                            tensor_name,
+                            tensor_qparam_initializers.original.scale.name,
+                            tensor_qparam_initializers.original.zero_point.name,
+                            data_type=tensor_info.data_type,
+                        )
+                    else:
+                        raise ValueError("Do not support the conversion case of {tensor_name}.")
+
+                del self.tensors_to_quantize[tensor_name]
+
+    def _quantize_sharing_param_tensors(self) -> None:
+        """
+        Adds Q/DQ ops to tensors that have been marked for quantization by op quantizers.
+        Only operates on tensors that want to use the quantization parameter initializers from an upstream tensor.
+        For example, a Transpose node's output tensor will typically want to use the same quantization parameter
+        initializers as the Transpose node's input.
+        """
+        while self.tensors_to_quantize:
+            for tensor_name, tensor_info in self.tensors_to_quantize.copy().items():
+                quant_provider = tensor_info.quant_para_provider
+                if quant_provider and quant_provider.input_name in self.quantized_value_map:
+                    del self.tensors_to_quantize[tensor_name]
+
+                    quantized_value = self.quantized_value_map[quant_provider.input_name].get_for_consumer(
+                        quant_provider.node_name
+                    )
+                    if self.is_input_a_initializer(tensor_name):
+                        raise ValueError("Quantization parameter shared mode is not supported for weight yet")
+
+                    scale_name = quantized_value.scale_name
+                    zp_name = quantized_value.zp_name
+
+                    # If the provider or the tensor has a quant override, the sharing process will be disabled
+                    # and the tensor will be quantized using independent parameters
+                    quant_overrides_provider = self.tensor_quant_overrides.get_per_tensor_overrides(
+                        quant_provider.input_name
+                    )
+                    quant_overrides = self.tensor_quant_overrides.get_per_tensor_overrides(tensor_name)
+                    if quant_overrides_provider or quant_overrides:
+                        tensor_qparam_initializers = self._make_tensor_scale_zp_initializers(tensor_name)
+                        if not tensor_qparam_initializers:
+                            raise ValueError(
+                                f"Quantization parameters are not specified for param {tensor_name}. "
+                                "In static mode quantization params for inputs and outputs of nodes to be quantized are required."
+                            )
+
+                        scale_name = tensor_qparam_initializers.original.scale.name
+                        zp_name = tensor_qparam_initializers.original.zero_point.name
+
+                    # Need to check if this tensor's quant_type is converted for some consumers.
+                    # If so, create new scale/zp initializers for these consumers.
+                    converted_qparam_inits = None
+
+                    if converted_qparam_inits is None:
+                        # Normal case: <producer> --> Q_shared --> DQ_shared --> <consumers>
+                        self._add_fn_pair_for_activation(tensor_name, scale_name, zp_name)
+                    else:
+                        # Conversion case: <producer> ---> Q_shared -+-> DQ_shared --> <consumers of original type>
+                        #                                            |
+                        #                                            +-> DQ_shared' --> Q2 --> DQ2 --> <consumers of converted type>
+                        raise ValueError("Do not support conversion case.")
+
+    def _quantize_bias_tensors(self) -> None:
+        for bias_name, bias_info in self.bias_to_quantize.items():
+            if bias_name in self.quantized_value_map:
+                continue
+            # Quantize the input
+            self.quantize_bias_static(bias_name, bias_info)
+            # TODO: Figure out why the program exits on Windows if we don't add a print statement here
+            logger.debug("Adds DQ ops (or Cast) for bias")
+            init = find_by_name(bias_name, self.model.initializer())
+            self.model.remove_initializer(init)
+            quant_value = self.quantized_value_map[bias_name].original
+            inputs = [quant_value.q_name, quant_value.scale_name, quant_value.zp_name]
+            node_name = add_dequant_suffix(bias_name)
+
+            # Keep the QDQ type of bias consistent with the weights
+            if quant_value.axis is not None:
+                dequant_node = onnx.helper.make_node(
+                    COP_DEQUANT_OP_NAME,
+                    inputs,
+                    [bias_name],
+                    node_name,
+                    axis=quant_value.axis,
+                    domain=COP_DOMAIN,
+                )
+            else:
+                dequant_node = onnx.helper.make_node(
+                    COP_DEQUANT_OP_NAME,
+                    inputs,
+                    [bias_name],
+                    node_name,
+                    domain=COP_DOMAIN,
+                )
+            self.model.add_node(dequant_node)
+
+    def _quantize_refine(self) -> None:
+        max_loop_num = 5
+        if "MaxLoopNum" in self.extra_options:
+            max_loop_num = self.extra_options["MaxLoopNum"]
+
+        align_concat = False
+        if "AlignConcat" in self.extra_options:
+            align_concat = self.extra_options["AlignConcat"]
+        align_pool = False
+        if "AlignPool" in self.extra_options:
+            align_pool = self.extra_options["AlignPool"]
+        align_pad = False
+        if "AlignPad" in self.extra_options:
+            align_pad = self.extra_options["AlignPad"]
+        align_slice = False
+        if "AlignSlice" in self.extra_options:
+            align_slice = self.extra_options["AlignSlice"]
+        align_transpose = False
+        if "AlignTranspose" in self.extra_options:
+            align_transpose = self.extra_options["AlignTranspose"]
+        align_reshape = False
+        if "AlignReshape" in self.extra_options:
+            align_reshape = self.extra_options["AlignReshape"]
+        adjust_bias_scale = True
+        if "AdjustBiasScale" in self.extra_options:
+            adjust_bias_scale = self.extra_options["AdjustBiasScale"]
+
+        self.model = align_quantize_info(
+            self.model,
+            max_loop_num=max_loop_num,
+            align_concat=align_concat,
+            align_pool=align_pool,
+            align_pad=align_pad,
+            align_slice=align_slice,
+            align_transpose=align_transpose,
+            align_reshape=align_reshape,
+            adjust_bias_scale=adjust_bias_scale,
+        )
+
+    def _simulate_transforms(self) -> None:
+        convert_leaky_relu_to_dpu_version = False
+        if "ConvertLeakyReluToDPUVersion" in self.extra_options:
+            convert_leaky_relu_to_dpu_version = self.extra_options["ConvertLeakyReluToDPUVersion"]
+        convert_sigmoid_to_hard_sigmoid = False
+        if "ConvertSigmoidToHardSigmoid" in self.extra_options:
+            convert_sigmoid_to_hard_sigmoid = self.extra_options["ConvertSigmoidToHardSigmoid"]
+        convert_hard_sigmoid_to_dpu_version = False
+        if "ConvertHardSigmoidToDPUVersion" in self.extra_options:
+            convert_hard_sigmoid_to_dpu_version = self.extra_options["ConvertHardSigmoidToDPUVersion"]
+        convert_avg_pool_to_dpu_version = False
+        if "ConvertAvgPoolToDPUVersion" in self.extra_options:
+            convert_avg_pool_to_dpu_version = self.extra_options["ConvertAvgPoolToDPUVersion"]
+        convert_reduce_mean_to_dpu_version = False
+        if "ConvertReduceMeanToDPUVersion" in self.extra_options:
+            convert_reduce_mean_to_dpu_version = self.extra_options["ConvertReduceMeanToDPUVersion"]
+        convert_softmax_to_dpu_version = False
+        if "ConvertSoftmaxToDPUVersion" in self.extra_options:
+            convert_softmax_to_dpu_version = self.extra_options["ConvertSoftmaxToDPUVersion"]
+        convert_instance_norm_to_dpu_version = False
+        if "ConvertInstanceNormToDPUVersion" in self.extra_options:
+            convert_instance_norm_to_dpu_version = self.extra_options["ConvertInstanceNormToDPUVersion"]
+        convert_clip_to_dpu_version = False
+        if "ConvertClipToDPUVersion" in self.extra_options:
+            convert_clip_to_dpu_version = self.extra_options["ConvertClipToDPUVersion"]
+
+        self.model.model, self.nodes_to_exclude = simulate_transforms(
+            self.model.model,
+            self.should_quantize_node,
+            self.nodes_to_quantize,
+            self.nodes_to_exclude,
+            convert_leaky_relu_to_dpu_version=convert_leaky_relu_to_dpu_version,
+            convert_sigmoid_to_hard_sigmoid=convert_sigmoid_to_hard_sigmoid,
+            convert_hard_sigmoid_to_dpu_version=convert_hard_sigmoid_to_dpu_version,
+            convert_avg_pool_to_dpu_version=convert_avg_pool_to_dpu_version,
+            convert_reduce_mean_to_dpu_version=convert_reduce_mean_to_dpu_version,
+            convert_softmax_to_dpu_version=convert_softmax_to_dpu_version,
+            convert_instance_norm_to_dpu_version=convert_instance_norm_to_dpu_version,
+            convert_clip_to_dpu_version=convert_clip_to_dpu_version,
+        )
+
+    def _convert_qdq_nodes(self) -> None:
+        """
+        This function is used to convert custom QDQ nodes to MS contributed version,
+        which is more widely adopted.
+        """
+        OpMapping = {
+            COP_QUANT_OP_NAME: QUANT_OP_NAME,
+            COP_DEQUANT_OP_NAME: DEQUANT_OP_NAME,
+        }
+        OpDomain = ms_domain
+        OpQuantType = (
+            onnx.TensorProto.INT4,
+            onnx.TensorProto.UINT4,
+            onnx.TensorProto.INT8,
+            onnx.TensorProto.UINT8,
+            onnx.TensorProto.INT16,
+            onnx.TensorProto.UINT16,
+            onnx.TensorProto.INT32,
+        )
+
+        converted_num = 0
+
+        for node in self.model.model.graph.node:
+            if node.op_type not in OpMapping:
+                continue
+
+            zp_init = self.model.get_initializer(node.input[2])
+            if zp_init is not None and zp_init.data_type in OpQuantType:
+                if zp_init.data_type == onnx.TensorProto.INT32:
+                    if node.op_type == COP_QUANT_OP_NAME:
+                        continue  # QuantizeLinear does not support int32 quantization
+                    elif np.count_nonzero(onnx.numpy_helper.to_array(zp_init)) != 0:
+                        continue  # DequantizeLinear does not support non-zero zero points
+
+                node.op_type = OpMapping[node.op_type]
+                node.domain = OpDomain
+
+                converted_num += 1
+
+        if converted_num > 0:
+            logger.info(f"Converted {converted_num} custom QDQs to MS contributed QDQs")

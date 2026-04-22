@@ -1,0 +1,194 @@
+{
+  "RTN (no rotation)": {
+    "round1": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 0.99,
+        "tps": 129.3,
+        "preview": "<think>\nOkay, I need to explain the theory of relativity in simple terms. Let me start by recalling "
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 0.989,
+        "tps": 129.5,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 0.99,
+        "tps": 129.3,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 0.989,
+        "tps": 129.5,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "round2": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.002,
+        "tps": 127.8,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 0.994,
+        "tps": 128.8,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 0.996,
+        "tps": 128.5,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP. Let me start by reca"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 0.993,
+        "tps": 128.9,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "avg_tps": 128.5,
+    "correct": true
+  },
+  "Separated rotation": {
+    "round1": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.053,
+        "tps": 121.6,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.053,
+        "tps": 121.5,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.054,
+        "tps": 121.5,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.052,
+        "tps": 121.6,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "round2": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.067,
+        "tps": 120.0,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.06,
+        "tps": 120.8,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.06,
+        "tps": 120.7,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.059,
+        "tps": 120.9,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "avg_tps": 120.6,
+    "correct": true
+  },
+  "Fused Gluon rotation": {
+    "round1": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.011,
+        "tps": 126.7,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.011,
+        "tps": 126.6,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.012,
+        "tps": 126.5,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.012,
+        "tps": 126.5,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "round2": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "time": 1.025,
+        "tps": 124.9,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "time": 1.019,
+        "tps": 125.6,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "time": 1.019,
+        "tps": 125.6,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "time": 1.017,
+        "tps": 125.8,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "avg_tps": 125.475,
+    "correct": true
+  }
+}

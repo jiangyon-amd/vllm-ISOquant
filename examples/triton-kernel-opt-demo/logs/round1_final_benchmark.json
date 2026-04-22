@@ -1,0 +1,30 @@
+{
+  "variant": "baseline",
+  "kernel_module": "baseline_matmul",
+  "execution_mode": "fixed-config",
+  "main_change": "Round 1 baseline kernel with straightforward linear program ordering.",
+  "shape": {
+    "m": 1024,
+    "n": 1024,
+    "k": 1024
+  },
+  "dtype": "bf16",
+  "correctness": "pass",
+  "rtol": 0.02,
+  "atol": 0.02,
+  "warmup": 20,
+  "iters": 100,
+  "average_ms": 0.015930910110473633,
+  "average_us": 15.930910110473633,
+  "tflops": 134.79980949664366,
+  "fixed_config": {
+    "kwargs": {
+      "BLOCK_M": 256,
+      "BLOCK_N": 64,
+      "BLOCK_K": 32,
+      "GROUP_M": 1
+    },
+    "num_warps": 8,
+    "num_stages": 4
+  }
+}

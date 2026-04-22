@@ -1,0 +1,112 @@
+{
+  "kernel": "MoE 3-in-1 rot+quant+sort M>1 HIP",
+  "tech_stack": "hip",
+  "checklist_path": "optimization_checklist.md",
+  "created": "2026-03-18T08:50:07.160476",
+  "baseline_eager": 29.1,
+  "baseline_compile": 17.2,
+  "best_result": 5.4,
+  "best_strategy": "C.1",
+  "strategies": {
+    "A.1": {
+      "description": "",
+      "status": "DONE",
+      "result_us": 6.3,
+      "notes": "HIP M=1: 6.3us (2.6x faster than Triton!) but FP4 0% correct (scalar dot)",
+      "timestamp": "2026-03-18T08:52:58.665403"
+    },
+    "A.2": {
+      "description": "",
+      "status": "DONE",
+      "result_us": 14.6,
+      "notes": "HIP M=16: 14.6us, faster than Triton 16.2us, but FP4 wrong",
+      "timestamp": "2026-03-18T08:52:58.685014"
+    },
+    "A.3": {
+      "description": "",
+      "status": "TRIED",
+      "result_us": 23.8,
+      "notes": "HIP M=32: 23.8us, SLOWER than Triton (scalar dot doesn't scale)",
+      "timestamp": "2026-03-18T08:52:58.706752"
+    },
+    "B.1": {
+      "description": "",
+      "status": "DONE",
+      "result_us": 6.3,
+      "notes": "LDS scatter works! No global temp row. Scale scatter correct if FP4 correct.",
+      "timestamp": "2026-03-18T08:52:58.724862"
+    },
+    "C.1": {
+      "description": "",
+      "status": "DONE",
+      "result_us": 5.4,
+      "notes": "MFMA HIP M=1: 5.4us (3x faster!) but FP4 0% (MFMA layout mapping wrong)",
+      "timestamp": "2026-03-18T09:00:07.956336"
+    },
+    "C.2": {
+      "description": "",
+      "status": "DONE",
+      "result_us": 7.0,
+      "notes": "MFMA HIP M=4: 7.0us. Same correctness issue.",
+      "timestamp": "2026-03-18T09:00:07.976490"
+    },
+    "C.3": {
+      "description": "",
+      "status": "TRIED",
+      "result_us": 5.4,
+      "notes": "MFMA HIP: 5.4us speed verified, FP4 wrong (v_cvt lane mapping issue). Dense MFMA .so also 0.3% match — compiled .so is stale. Need debug kernel to print per-lane MFMA output.",
+      "timestamp": "2026-03-18T09:08:43.982545"
+    }
+  },
+  "history": [
+    {
+      "strategy": "A.1",
+      "status": "DONE",
+      "result": 6.3,
+      "notes": "HIP M=1: 6.3us (2.6x faster than Triton!) but FP4 0% correct (scalar dot)",
+      "time": "2026-03-18T08:52:58.665410"
+    },
+    {
+      "strategy": "A.2",
+      "status": "DONE",
+      "result": 14.6,
+      "notes": "HIP M=16: 14.6us, faster than Triton 16.2us, but FP4 wrong",
+      "time": "2026-03-18T08:52:58.685022"
+    },
+    {
+      "strategy": "A.3",
+      "status": "TRIED",
+      "result": 23.8,
+      "notes": "HIP M=32: 23.8us, SLOWER than Triton (scalar dot doesn't scale)",
+      "time": "2026-03-18T08:52:58.706756"
+    },
+    {
+      "strategy": "B.1",
+      "status": "DONE",
+      "result": 6.3,
+      "notes": "LDS scatter works! No global temp row. Scale scatter correct if FP4 correct.",
+      "time": "2026-03-18T08:52:58.724868"
+    },
+    {
+      "strategy": "C.1",
+      "status": "DONE",
+      "result": 5.4,
+      "notes": "MFMA HIP M=1: 5.4us (3x faster!) but FP4 0% (MFMA layout mapping wrong)",
+      "time": "2026-03-18T09:00:07.956343"
+    },
+    {
+      "strategy": "C.2",
+      "status": "DONE",
+      "result": 7.0,
+      "notes": "MFMA HIP M=4: 7.0us. Same correctness issue.",
+      "time": "2026-03-18T09:00:07.976498"
+    },
+    {
+      "strategy": "C.3",
+      "status": "TRIED",
+      "result": 5.4,
+      "notes": "MFMA HIP: 5.4us speed verified, FP4 wrong (v_cvt lane mapping issue). Dense MFMA .so also 0.3% match — compiled .so is stale. Need debug kernel to print per-lane MFMA output.",
+      "time": "2026-03-18T09:08:43.982550"
+    }
+  ]
+}

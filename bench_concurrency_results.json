@@ -1,0 +1,404 @@
+{
+  "RTN": {
+    "1": {
+      "r1": {
+        "concurrency": 1,
+        "num_requests": 64,
+        "wall_time": 64.42,
+        "total_tokens": 8192,
+        "throughput_tps": 127.2,
+        "avg_tps_per_req": 127.2,
+        "median_latency_s": 1.007,
+        "median_tpot_ms": 7.87
+      },
+      "r2": {
+        "concurrency": 1,
+        "num_requests": 64,
+        "wall_time": 64.36,
+        "total_tokens": 8192,
+        "throughput_tps": 127.3,
+        "avg_tps_per_req": 127.3,
+        "median_latency_s": 1.006,
+        "median_tpot_ms": 7.86
+      }
+    },
+    "2": {
+      "r1": {
+        "concurrency": 2,
+        "num_requests": 64,
+        "wall_time": 34.0,
+        "total_tokens": 8192,
+        "throughput_tps": 241.0,
+        "avg_tps_per_req": 120.5,
+        "median_latency_s": 1.062,
+        "median_tpot_ms": 8.3
+      },
+      "r2": {
+        "concurrency": 2,
+        "num_requests": 64,
+        "wall_time": 34.03,
+        "total_tokens": 8192,
+        "throughput_tps": 240.7,
+        "avg_tps_per_req": 120.4,
+        "median_latency_s": 1.063,
+        "median_tpot_ms": 8.31
+      }
+    },
+    "4": {
+      "r1": {
+        "concurrency": 4,
+        "num_requests": 64,
+        "wall_time": 17.17,
+        "total_tokens": 8192,
+        "throughput_tps": 477.2,
+        "avg_tps_per_req": 119.4,
+        "median_latency_s": 1.072,
+        "median_tpot_ms": 8.37
+      },
+      "r2": {
+        "concurrency": 4,
+        "num_requests": 64,
+        "wall_time": 17.2,
+        "total_tokens": 8192,
+        "throughput_tps": 476.3,
+        "avg_tps_per_req": 119.2,
+        "median_latency_s": 1.074,
+        "median_tpot_ms": 8.39
+      }
+    },
+    "8": {
+      "r1": {
+        "concurrency": 8,
+        "num_requests": 64,
+        "wall_time": 8.88,
+        "total_tokens": 8192,
+        "throughput_tps": 922.2,
+        "avg_tps_per_req": 115.6,
+        "median_latency_s": 1.107,
+        "median_tpot_ms": 8.65
+      },
+      "r2": {
+        "concurrency": 8,
+        "num_requests": 64,
+        "wall_time": 8.91,
+        "total_tokens": 8192,
+        "throughput_tps": 919.0,
+        "avg_tps_per_req": 115.2,
+        "median_latency_s": 1.112,
+        "median_tpot_ms": 8.69
+      }
+    },
+    "16": {
+      "r1": {
+        "concurrency": 16,
+        "num_requests": 64,
+        "wall_time": 4.52,
+        "total_tokens": 8192,
+        "throughput_tps": 1813.9,
+        "avg_tps_per_req": 113.8,
+        "median_latency_s": 1.125,
+        "median_tpot_ms": 8.79
+      },
+      "r2": {
+        "concurrency": 16,
+        "num_requests": 64,
+        "wall_time": 4.49,
+        "total_tokens": 8192,
+        "throughput_tps": 1824.4,
+        "avg_tps_per_req": 114.4,
+        "median_latency_s": 1.118,
+        "median_tpot_ms": 8.73
+      }
+    },
+    "32": {
+      "r1": {
+        "concurrency": 32,
+        "num_requests": 64,
+        "wall_time": 2.34,
+        "total_tokens": 8192,
+        "throughput_tps": 3497.3,
+        "avg_tps_per_req": 110.6,
+        "median_latency_s": 1.159,
+        "median_tpot_ms": 9.05
+      },
+      "r2": {
+        "concurrency": 32,
+        "num_requests": 64,
+        "wall_time": 2.34,
+        "total_tokens": 8192,
+        "throughput_tps": 3496.0,
+        "avg_tps_per_req": 110.5,
+        "median_latency_s": 1.158,
+        "median_tpot_ms": 9.05
+      }
+    }
+  },
+  "Separated": {
+    "1": {
+      "r1": {
+        "concurrency": 1,
+        "num_requests": 64,
+        "wall_time": 67.81,
+        "total_tokens": 8192,
+        "throughput_tps": 120.8,
+        "avg_tps_per_req": 120.8,
+        "median_latency_s": 1.059,
+        "median_tpot_ms": 8.28
+      },
+      "r2": {
+        "concurrency": 1,
+        "num_requests": 64,
+        "wall_time": 67.83,
+        "total_tokens": 8192,
+        "throughput_tps": 120.8,
+        "avg_tps_per_req": 120.8,
+        "median_latency_s": 1.06,
+        "median_tpot_ms": 8.28
+      }
+    },
+    "2": {
+      "r1": {
+        "concurrency": 2,
+        "num_requests": 64,
+        "wall_time": 36.19,
+        "total_tokens": 8192,
+        "throughput_tps": 226.4,
+        "avg_tps_per_req": 113.2,
+        "median_latency_s": 1.131,
+        "median_tpot_ms": 8.84
+      },
+      "r2": {
+        "concurrency": 2,
+        "num_requests": 64,
+        "wall_time": 36.19,
+        "total_tokens": 8192,
+        "throughput_tps": 226.3,
+        "avg_tps_per_req": 113.2,
+        "median_latency_s": 1.132,
+        "median_tpot_ms": 8.84
+      }
+    },
+    "4": {
+      "r1": {
+        "concurrency": 4,
+        "num_requests": 64,
+        "wall_time": 18.4,
+        "total_tokens": 8192,
+        "throughput_tps": 445.2,
+        "avg_tps_per_req": 111.4,
+        "median_latency_s": 1.149,
+        "median_tpot_ms": 8.98
+      },
+      "r2": {
+        "concurrency": 4,
+        "num_requests": 64,
+        "wall_time": 18.4,
+        "total_tokens": 8192,
+        "throughput_tps": 445.3,
+        "avg_tps_per_req": 111.4,
+        "median_latency_s": 1.149,
+        "median_tpot_ms": 8.97
+      }
+    },
+    "8": {
+      "r1": {
+        "concurrency": 8,
+        "num_requests": 64,
+        "wall_time": 9.62,
+        "total_tokens": 8192,
+        "throughput_tps": 851.6,
+        "avg_tps_per_req": 106.7,
+        "median_latency_s": 1.201,
+        "median_tpot_ms": 9.38
+      },
+      "r2": {
+        "concurrency": 8,
+        "num_requests": 64,
+        "wall_time": 9.64,
+        "total_tokens": 8192,
+        "throughput_tps": 850.2,
+        "avg_tps_per_req": 106.5,
+        "median_latency_s": 1.202,
+        "median_tpot_ms": 9.39
+      }
+    },
+    "16": {
+      "r1": {
+        "concurrency": 16,
+        "num_requests": 64,
+        "wall_time": 4.79,
+        "total_tokens": 8192,
+        "throughput_tps": 1709.7,
+        "avg_tps_per_req": 107.3,
+        "median_latency_s": 1.194,
+        "median_tpot_ms": 9.33
+      },
+      "r2": {
+        "concurrency": 16,
+        "num_requests": 64,
+        "wall_time": 4.77,
+        "total_tokens": 8192,
+        "throughput_tps": 1717.2,
+        "avg_tps_per_req": 107.7,
+        "median_latency_s": 1.188,
+        "median_tpot_ms": 9.28
+      }
+    },
+    "32": {
+      "r1": {
+        "concurrency": 32,
+        "num_requests": 64,
+        "wall_time": 2.49,
+        "total_tokens": 8192,
+        "throughput_tps": 3289.1,
+        "avg_tps_per_req": 104.0,
+        "median_latency_s": 1.231,
+        "median_tpot_ms": 9.61
+      },
+      "r2": {
+        "concurrency": 32,
+        "num_requests": 64,
+        "wall_time": 2.5,
+        "total_tokens": 8192,
+        "throughput_tps": 3276.2,
+        "avg_tps_per_req": 103.6,
+        "median_latency_s": 1.237,
+        "median_tpot_ms": 9.66
+      }
+    }
+  },
+  "Fused": {
+    "1": {
+      "r1": {
+        "concurrency": 1,
+        "num_requests": 64,
+        "wall_time": 66.02,
+        "total_tokens": 8192,
+        "throughput_tps": 124.1,
+        "avg_tps_per_req": 124.1,
+        "median_latency_s": 1.032,
+        "median_tpot_ms": 8.06
+      },
+      "r2": {
+        "concurrency": 1,
+        "num_requests": 64,
+        "wall_time": 66.03,
+        "total_tokens": 8192,
+        "throughput_tps": 124.1,
+        "avg_tps_per_req": 124.1,
+        "median_latency_s": 1.032,
+        "median_tpot_ms": 8.06
+      }
+    },
+    "2": {
+      "r1": {
+        "concurrency": 2,
+        "num_requests": 64,
+        "wall_time": 35.02,
+        "total_tokens": 8192,
+        "throughput_tps": 233.9,
+        "avg_tps_per_req": 117.0,
+        "median_latency_s": 1.094,
+        "median_tpot_ms": 8.55
+      },
+      "r2": {
+        "concurrency": 2,
+        "num_requests": 64,
+        "wall_time": 35.05,
+        "total_tokens": 8192,
+        "throughput_tps": 233.7,
+        "avg_tps_per_req": 116.9,
+        "median_latency_s": 1.095,
+        "median_tpot_ms": 8.56
+      }
+    },
+    "4": {
+      "r1": {
+        "concurrency": 4,
+        "num_requests": 64,
+        "wall_time": 17.73,
+        "total_tokens": 8192,
+        "throughput_tps": 462.1,
+        "avg_tps_per_req": 115.6,
+        "median_latency_s": 1.107,
+        "median_tpot_ms": 8.65
+      },
+      "r2": {
+        "concurrency": 4,
+        "num_requests": 64,
+        "wall_time": 17.83,
+        "total_tokens": 8192,
+        "throughput_tps": 459.5,
+        "avg_tps_per_req": 115.0,
+        "median_latency_s": 1.113,
+        "median_tpot_ms": 8.7
+      }
+    },
+    "8": {
+      "r1": {
+        "concurrency": 8,
+        "num_requests": 64,
+        "wall_time": 9.14,
+        "total_tokens": 8192,
+        "throughput_tps": 896.4,
+        "avg_tps_per_req": 112.4,
+        "median_latency_s": 1.139,
+        "median_tpot_ms": 8.9
+      },
+      "r2": {
+        "concurrency": 8,
+        "num_requests": 64,
+        "wall_time": 9.12,
+        "total_tokens": 8192,
+        "throughput_tps": 898.7,
+        "avg_tps_per_req": 112.5,
+        "median_latency_s": 1.137,
+        "median_tpot_ms": 8.88
+      }
+    },
+    "16": {
+      "r1": {
+        "concurrency": 16,
+        "num_requests": 64,
+        "wall_time": 4.62,
+        "total_tokens": 8192,
+        "throughput_tps": 1771.4,
+        "avg_tps_per_req": 111.2,
+        "median_latency_s": 1.152,
+        "median_tpot_ms": 9.0
+      },
+      "r2": {
+        "concurrency": 16,
+        "num_requests": 64,
+        "wall_time": 4.64,
+        "total_tokens": 8192,
+        "throughput_tps": 1764.8,
+        "avg_tps_per_req": 110.8,
+        "median_latency_s": 1.157,
+        "median_tpot_ms": 9.04
+      }
+    },
+    "32": {
+      "r1": {
+        "concurrency": 32,
+        "num_requests": 64,
+        "wall_time": 2.41,
+        "total_tokens": 8192,
+        "throughput_tps": 3405.7,
+        "avg_tps_per_req": 107.7,
+        "median_latency_s": 1.189,
+        "median_tpot_ms": 9.29
+      },
+      "r2": {
+        "concurrency": 32,
+        "num_requests": 64,
+        "wall_time": 2.38,
+        "total_tokens": 8192,
+        "throughput_tps": 3435.7,
+        "avg_tps_per_req": 108.4,
+        "median_latency_s": 1.181,
+        "median_tpot_ms": 9.23
+      }
+    }
+  }
+}

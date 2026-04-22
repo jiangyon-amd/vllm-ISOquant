@@ -1,0 +1,27 @@
+.. Copyright (C) 2025, Advanced Micro Devices, Inc. All rights reserved.
+
+Quark for AMD Instinct Accelerators
+===================================
+
+Depending on the GPU to be used, different quantization schemes may or may not have accelerated support in the underlying hardware.
+
+On all GPUs supported by PyTorch, quantized models can be evaluated using fake quantization (quantize-dequantize), effectively using a higher widely supported precision for compute (e.g.,  ``float16``).
+
+.. note::
+
+    As an example, AMD Instinct MI300 supports ``float8`` compute, which means that linear layers quantized in ``float8`` for both the activation and weights may use ``float8 @ float8 -> float16`` computation.
+
+    AMD Instinct MI325 also supports ``float8`` compute similar to MI300, enabling efficient ``float8 @ float8 -> float16`` computation for quantized models.
+
+    AMD Instinct MI355 supports both ``float8`` and ``mxfp4`` (Microscaling FP4) compute, providing additional flexibility for ultra-low precision quantization with ``mxfp4 @ mxfp4`` computation.
+
+    On the other hand, Instinct MI210 and Instinct MI250 GPUs (CDNA2 architecture) do not support ``float8`` computations, and only ``QDQ`` can be used for this specific ``dtype`` and hardware.
+
+Below are some references on how you can leverage Quark to seamlessly run accelerated quantized models on AMD Instinct GPUs:
+
+.. toctree::
+   :caption: Resources
+   :maxdepth: 1
+
+   Language Model Post Training Quantization (PTQ) Using Quark <../../pytorch/example_quark_torch_llm_ptq>
+   Evaluation of Quantized Models <../../pytorch/example_quark_torch_llm_eval_perplexity>

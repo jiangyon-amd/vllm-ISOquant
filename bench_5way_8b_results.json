@@ -1,0 +1,167 @@
+{
+  "RTN": {
+    "results": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "avg_time": 1.011,
+        "avg_tps": 126.5,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "avg_time": 1.01,
+        "avg_tps": 126.8,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "avg_time": 1.013,
+        "avg_tps": 126.4,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP. Let me start by reca"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "avg_time": 1.011,
+        "avg_tps": 126.6,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "correct": true
+  },
+  "Separated Hadamard": {
+    "results": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "avg_time": 1.066,
+        "avg_tps": 120.0,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "avg_time": 1.064,
+        "avg_tps": 120.3,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "avg_time": 1.064,
+        "avg_tps": 120.4,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "avg_time": 1.063,
+        "avg_tps": 120.4,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "correct": true
+  },
+  "Fused Hadamard": {
+    "results": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "avg_time": 1.028,
+        "avg_tps": 124.5,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "avg_time": 1.025,
+        "avg_tps": 124.9,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "avg_time": 1.026,
+        "avg_tps": 124.8,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "avg_time": 1.026,
+        "avg_tps": 124.8,
+        "preview": "<think>\nOkay, the user wants me to describe the process of photosynthesis step by step. Let me start"
+      }
+    ],
+    "correct": true
+  },
+  "Separated Trained": {
+    "results": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "avg_time": 1.064,
+        "avg_tps": 120.3,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "avg_time": 1.059,
+        "avg_tps": 120.8,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "avg_time": 1.062,
+        "avg_tps": 120.6,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "avg_time": 1.059,
+        "avg_tps": 120.8,
+        "preview": "<think>\nOkay, the user wants a step-by-step description of photosynthesis. Let me start by recalling"
+      }
+    ],
+    "correct": true
+  },
+  "Fused Trained": {
+    "results": [
+      {
+        "prompt": "Explain the theory of relativity in simple terms.",
+        "tokens": 128,
+        "avg_time": 1.033,
+        "avg_tps": 124.0,
+        "preview": "<think>\nOkay, the user wants me to explain the theory of relativity in simple terms. Let me start by"
+      },
+      {
+        "prompt": "Write a Python function to compute fibonacci numbe",
+        "tokens": 128,
+        "avg_time": 1.029,
+        "avg_tps": 124.3,
+        "preview": "<think>\nOkay, I need to write a Python function to compute Fibonacci numbers efficiently. Let me thi"
+      },
+      {
+        "prompt": "What are the main differences between TCP and UDP ",
+        "tokens": 128,
+        "avg_time": 1.032,
+        "avg_tps": 124.0,
+        "preview": "<think>\nOkay, so I need to figure out the main differences between TCP and UDP protocols. Let me sta"
+      },
+      {
+        "prompt": "Describe the process of photosynthesis step by ste",
+        "tokens": 128,
+        "avg_time": 1.029,
+        "avg_tps": 124.4,
+        "preview": "<think>\nOkay, the user wants a step-by-step description of photosynthesis. Let me start by recalling"
+      }
+    ],
+    "correct": true
+  }
+}

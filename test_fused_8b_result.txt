@@ -1,0 +1,12 @@
+=== Fused 8B 单次测试开始 ===
+启动服务 (Fused)...
+  等待健康检查: HTTPConnectionPool(host='localhost', port=8200): Max retries exceeded with url: /health (Caused by NewConnectionError("HTTPConnection(host='localhost', port=8200): Failed to establish a new connection: [Errno 111] Connection refused"))
+  等待健康检查: HTTPConnectionPool(host='localhost', port=8200): Max retries exceeded with url: /health (Caused by NewConnectionError("HTTPConnection(host='localhost', port=8200): Failed to establish a new connection: [Errno 111] Connection refused"))
+  等待健康检查: HTTPConnectionPool(host='localhost', port=8200): Max retries exceeded with url: /health (Caused by NewConnectionError("HTTPConnection(host='localhost', port=8200): Failed to establish a new connection: [Errno 111] Connection refused"))
+服务已就绪.
+发送一次 chat completion...
+完成: 64 tokens, 0.54s, 118.0 tok/s
+回复预览: <think>
+Okay, the user is asking "What is 2+2? Reply in one short sentence." Let me make sure I understand the query correctly. They want the answer to 2+2, which is a basic arithmetic problem, and th
+=== Fused 8B 单次测试通过 ===
+服务已停止.

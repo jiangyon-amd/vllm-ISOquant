@@ -1,0 +1,19 @@
+{
+  "variant": "baseline",
+  "kernel_module": "baseline_matmul",
+  "main_change": "Round 1 baseline kernel with straightforward linear program ordering.",
+  "shape": {
+    "m": 1024,
+    "n": 1024,
+    "k": 1024
+  },
+  "dtype": "bf16",
+  "correctness": "pass",
+  "rtol": 0.02,
+  "atol": 0.02,
+  "warmup": 20,
+  "iters": 50,
+  "average_ms": 0.020020160675048828,
+  "average_us": 20.020160675048828,
+  "tflops": 107.26605459647553
+}
