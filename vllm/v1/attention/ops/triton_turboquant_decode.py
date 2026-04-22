@@ -28,9 +28,23 @@ _FP8_E4B15: int | None = None
 _HIP_STAGE1_LIB = None
 _HIP_STAGE1_FN = None
 
+# Multi-warp Stage1 variants for workload-adaptive dispatch:
+# 8-warp (256 threads, launch_bounds(256,2)): best for small B, long seq
+# 4-warp (128 threads, launch_bounds(128,4)): best for medium B, long seq
+_HIP_STAGE1_8WARP_LIB = None
+_HIP_STAGE1_8WARP_FN = None
+_HIP_STAGE1_4WARP_LIB = None
+_HIP_STAGE1_4WARP_FN = None
+
 # V56: GEMV-fused Stage1 (computes q_rot inline, no separate GEMM needed)
 _HIP_V56_LIB = None
 _HIP_V56_FN = None
+
+# Fused Stage1+Stage2: processes full sequence in one kernel, outputs bf16
+# directly.  Grid = (B, Hq) — no split dimension, no mid_o intermediate.
+# Best for large B (grid saturates CUs) with short sequences.
+_HIP_FUSED_LIB = None
+_HIP_FUSED_FN = None
 
 # HIP Stage2: fast reduction + optional bf16 output
 _HIP_STAGE2_LIB = None
@@ -191,6 +205,200 @@ def _load_hip_stage1():
     except Exception:
         _HIP_STAGE1_LIB = False
         return None
+
+
+# Shared argtypes for all Stage1 variants (same ABI as v52)
+_STAGE1_ARGTYPES = (
+    [ctypes.c_void_p] * 6  # q_rot, kv_cache, bt, seq_lens, centroids, mid_o
+    + [ctypes.c_int] * 2   # stride_qb, stride_qh
+    + [ctypes.c_int] * 3   # stride_cb, stride_cp, stride_ch
+    + [ctypes.c_int]       # stride_bt
+    + [ctypes.c_int] * 3   # stride_mb, stride_mh, stride_ms
+    + [ctypes.c_int] * 4   # num_kv_heads, block_size, num_kv_splits, kv_group_size
+    + [ctypes.c_float]     # attn_scale
+    + [ctypes.c_int]       # norm_correction
+    + [ctypes.c_int] * 2   # B, Hq
+    + [ctypes.c_void_p]    # hipStream_t stream
+)
+
+
+def _load_hip_stage1_variant(so_name, lib_attr, fn_attr):
+    """Generic loader for Stage1 multi-warp variants (same ABI)."""
+    lib_val = globals().get(lib_attr)
+    fn_val = globals().get(fn_attr)
+    if fn_val is not None:
+        return fn_val
+    if lib_val is False:
+        return None
+
+    if not current_platform.is_rocm():
+        globals()[lib_attr] = False
+        return None
+
+    so_path = os.path.join(os.path.dirname(__file__), so_name)
+    if not _hip_so_is_usable(so_path, __file__):
+        globals()[lib_attr] = False
+        return None
+
+    try:
+        lib = ctypes.CDLL(so_path)
+        fn = lib.launch_tq_decode_stage1
+        fn.argtypes = _STAGE1_ARGTYPES
+        fn.restype = None
+        globals()[lib_attr] = lib
+        globals()[fn_attr] = fn
+        return fn
+    except Exception:
+        globals()[lib_attr] = False
+        return None
+
+
+def _load_hip_stage1_8warp():
+    """Load 8-warp (256 threads) Stage1 kernel for small B, long seq."""
+    return _load_hip_stage1_variant(
+        "tq_decode_8warp_hip.so",
+        "_HIP_STAGE1_8WARP_LIB",
+        "_HIP_STAGE1_8WARP_FN",
+    )
+
+
+def _load_hip_stage1_4warp():
+    """Load 4-warp (128 threads) Stage1 kernel for medium B, long seq."""
+    return _load_hip_stage1_variant(
+        "tq_decode_4warp_hip.so",
+        "_HIP_STAGE1_4WARP_LIB",
+        "_HIP_STAGE1_4WARP_FN",
+    )
+
+
+# Workload-adaptive Stage1 kernel selection thresholds.
+# Based on MI355X benchmark (gfx950, Hq=64, Hk=8, splits=32):
+#
+# | B\seq |  512 | 2048 | 4096 | 8192 | best kernel          |
+# |-------|------|------|------|------|----------------------|
+# | 4     | -1%  | -12% | -9%  | -10% | 8warp (B≤4, seq≥1k) |
+# | 20    | +0%  | -1%  | -2%  | -2%  | 4warp (B 5-20, seq≥1k) |
+# | 32    | +0%  | +1%  | -    | -    | v52 (B>20 or short)  |
+# | 100   | +0%  | -    | -    | -    | v52 (B>20 or short)  |
+#
+# The 8-warp kernel uses launch_bounds(256,2) → only 2 blocks/CU, which
+# causes severe underutilization when grid exceeds CU capacity (large B).
+# The 4-warp kernel uses launch_bounds(128,4) → 4 blocks/CU, moderate.
+# The v52 2-warp kernel uses launch_bounds(64,8) → 8 blocks/CU, safest.
+_STAGE1_8WARP_BATCH_THRESHOLD = 4     # Use 8-warp only for B ≤ 4
+_STAGE1_4WARP_BATCH_THRESHOLD = 20    # Use 4-warp for B in (4, 20]
+_STAGE1_MULTIWARP_SEQ_THRESHOLD = 1024  # Only use multi-warp when seq ≥ 1024
+
+
+def _select_hip_stage1_fn(batch_size: int, max_seq_len_hint: int):
+    """Select the best Stage1 kernel variant based on workload shape.
+
+    Returns the function pointer (or None if not available), falling
+    back through 8warp → 4warp → v52 as appropriate.
+    """
+    if max_seq_len_hint >= _STAGE1_MULTIWARP_SEQ_THRESHOLD:
+        if batch_size <= _STAGE1_8WARP_BATCH_THRESHOLD:
+            fn = _load_hip_stage1_8warp()
+            if fn is not None:
+                return fn, "hip_v52_8warp"
+        if batch_size <= _STAGE1_4WARP_BATCH_THRESHOLD:
+            fn = _load_hip_stage1_4warp()
+            if fn is not None:
+                return fn, "hip_v52_4warp"
+
+    fn = _load_hip_stage1()
+    if fn is not None:
+        return fn, "hip_v52"
+    return None, "triton"
+
+
+def _load_hip_fused():
+    """Load the fused Stage1+Stage2 kernel (no split, direct bf16 output).
+
+    The fused kernel processes the full sequence per block with Grid=(B, Hq),
+    eliminating the mid_o intermediate buffer and the Stage2 reduce kernel.
+    Best for large-batch short-sequence workloads where the grid (B*Hq)
+    provides sufficient CU occupancy and per-block work is manageable.
+    """
+    global _HIP_FUSED_LIB, _HIP_FUSED_FN
+    if _HIP_FUSED_FN is not None:
+        return _HIP_FUSED_FN
+    if _HIP_FUSED_LIB is False:
+        return None
+
+    if not current_platform.is_rocm():
+        _HIP_FUSED_LIB = False
+        return None
+
+    so_path = os.path.join(os.path.dirname(__file__), "tq_decode_fused_hip.so")
+    if not _hip_so_is_usable(so_path, __file__):
+        _HIP_FUSED_LIB = False
+        return None
+
+    try:
+        lib = ctypes.CDLL(so_path)
+        fn = lib.launch_tq_decode_fused
+        fn.argtypes = (
+            [ctypes.c_void_p] * 6  # q_rot, kv_cache, bt, seq_lens, centroids, output
+            + [ctypes.c_int] * 2   # stride_qb, stride_qh
+            + [ctypes.c_int] * 3   # stride_cb, stride_cp, stride_ch
+            + [ctypes.c_int]       # stride_bt
+            + [ctypes.c_int] * 2   # stride_ob, stride_oh
+            + [ctypes.c_int]       # num_kv_heads
+            + [ctypes.c_int]       # block_size
+            + [ctypes.c_int]       # kv_group_size
+            + [ctypes.c_float]     # attn_scale
+            + [ctypes.c_int]       # norm_correction
+            + [ctypes.c_int] * 2   # B, Hq
+            + [ctypes.c_void_p]    # hipStream_t stream
+        )
+        fn.restype = None
+        _HIP_FUSED_LIB = lib
+        _HIP_FUSED_FN = fn
+        return fn
+    except Exception:
+        _HIP_FUSED_LIB = False
+        return None
+
+
+# Fused kernel dispatch thresholds.
+# Based on MI355X benchmark sweep (gfx950, Hq=64, Hk=8):
+#
+# Fused kernel wins when Grid=(B, Hq) saturates CUs and per-block work
+# (seq_len) is small.  Split kernel wins when seq_len is large because
+# the split dimension provides additional parallelism (Grid=(B, Hq, splits)).
+#
+# | B     | seq   | fused vs split | margin   |
+# |-------|-------|----------------|----------|
+# | 4     | 256   | fused wins     | +9.1%    |
+# | 4     | 512   | split wins     | -8.3%    |
+# | 8     | 512   | fused wins     | +6.0%    |
+# | 8     | 1024  | split wins     | -12.6%   |
+# | 16    | 512   | fused wins     | +8.5%    |
+# | 16    | 1024  | split wins     | -3.0%    |
+# | 32    | 1024  | fused wins     | +11.2%   |
+# | 32    | 2048  | split wins     | -0.9%    |
+# | 64    | 1024  | fused wins     | +6.6%    |
+# | 100   | 512   | fused wins     | +19.2%   |
+#
+# Conservative rule: use fused when seq_len <= threshold,
+# with threshold increasing as B grows (more grid blocks = better CU fill).
+_FUSED_SEQ_THRESHOLD_SMALL_B = 512   # B < 32: fuse if seq <= 512
+_FUSED_SEQ_THRESHOLD_LARGE_B = 1024  # B >= 32: fuse if seq <= 1024
+_FUSED_BATCH_THRESHOLD_LARGE = 32    # boundary between small/large B
+
+
+def _should_use_fused(batch_size: int, max_seq_len_hint: int) -> bool:
+    """Decide whether to use the fused Stage1+Stage2 kernel.
+
+    Returns True when the fused path (no splits, direct bf16 output) is
+    expected to be faster than the split Stage1 + Stage2 pipeline.
+    """
+    if max_seq_len_hint <= 0:
+        return False
+    if batch_size >= _FUSED_BATCH_THRESHOLD_LARGE:
+        return max_seq_len_hint <= _FUSED_SEQ_THRESHOLD_LARGE_B
+    return max_seq_len_hint <= _FUSED_SEQ_THRESHOLD_SMALL_B
 
 
 def _load_hip_v56():
@@ -1073,6 +1281,87 @@ def triton_turboquant_decode_attention(
     stage1_custom_op = "none"
     stage2_custom_op = "none"
 
+    # -------------------------------------------------------------------
+    # FUSED PATH: Stage1+Stage2 in a single kernel for short-sequence
+    # workloads.  Grid=(B, Hq) — no split dimension, no mid_o buffer.
+    # Directly outputs bf16.  This eliminates:
+    #   1. mid_o allocation & memory traffic (up to 8MB write+read)
+    #   2. Stage2 kernel launch overhead
+    # Best when B is large enough for CU saturation and seq is short.
+    # -------------------------------------------------------------------
+    hip_fused_fn = _load_hip_fused() if (
+        _hip_safe
+        and query.dtype == torch.bfloat16
+        and _should_use_fused(B, max_seq_len_hint)
+    ) else None
+
+    if hip_fused_fn is not None:
+        # Need q_rot for the fused kernel (same as v52 path)
+        if q_rot_buf is not None and q_rot_buf.shape[0] >= B:
+            q_rot = q_rot_buf[:B]
+            q_flat = query.reshape(B * Hq, D).float()
+            t0 = time.perf_counter()
+            torch.mm(q_flat, PiT, out=q_rot.reshape(B * Hq, D))
+            host_qrot_us = (time.perf_counter() - t0) * 1e6
+        else:
+            q_float = query.float()
+            t0 = time.perf_counter()
+            q_rot = (q_float @ PiT).contiguous()
+            host_qrot_us = (time.perf_counter() - t0) * 1e6
+            if buf_holder is not None:
+                buf_holder._tq_q_rot_buf = q_rot
+
+        # Allocate bf16 output directly (no mid_o needed)
+        if (
+            output_buf is not None
+            and output_buf.shape[0] >= B
+            and output_buf.dtype == torch.bfloat16
+        ):
+            output = output_buf[:B, :Hq, :D]
+        else:
+            output = torch.empty(B, Hq, D, dtype=torch.bfloat16, device=device)
+            if buf_holder is not None:
+                buf_holder._tq_output_buf = output
+
+        _nc = 1 if norm_correction else 0
+        t0 = time.perf_counter()
+        hip_fused_fn(
+            q_rot.data_ptr(),
+            kv_cache.data_ptr(),
+            block_table.data_ptr(),
+            seq_lens.data_ptr(),
+            centroids_f32.data_ptr(),
+            output.data_ptr(),
+            q_rot.stride(0), q_rot.stride(1),
+            kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
+            block_table.stride(0),
+            output.stride(0), output.stride(1),
+            Hk, block_size, kv_group_size,
+            scale,
+            _nc,
+            B, Hq,
+            ctypes.c_void_p(stream_ptr),
+        )
+        host_stage1_us = (time.perf_counter() - t0) * 1e6
+        decode_path = "hip_fused"
+        stage2_backend = "fused"
+        stage1_custom_op = "ctypes"
+        stage2_custom_op = "fused"
+
+        record_decode_call(
+            batch_size=B,
+            max_seq_len=max_seq_len_hint,
+            num_kv_splits=0,  # no splits in fused path
+            path=decode_path,
+            stage2_backend=stage2_backend,
+            custom_op=f"{stage1_custom_op}/{stage2_custom_op}",
+            output_dtype=str(output.dtype).replace("torch.", ""),
+            host_qrot_us=host_qrot_us,
+            host_stage1_us=host_stage1_us,
+            host_stage2_us=0.0,
+        )
+        return output
+
     # Try v56 GEMV-fused kernel for small batch (saves ~14us at B=1)
     hip_v56_fn = _load_hip_v56() if (
         _hip_safe and _should_use_v56(B, max_seq_len_hint, v56_max_seq_len)
@@ -1135,7 +1424,11 @@ def triton_turboquant_decode_attention(
                 if buf_holder is not None:
                     buf_holder._tq_q_rot_buf = q_rot
 
-        hip_fn = _load_hip_stage1() if _hip_safe else None
+        # Workload-adaptive Stage1 selection: picks the best kernel
+        # variant (8-warp/4-warp/2-warp) based on batch size and seq length.
+        hip_fn, hip_path = _select_hip_stage1_fn(
+            B, max_seq_len_hint
+        ) if _hip_safe else (None, "triton")
 
         if hip_fn is not None:
             _nc = 1 if norm_correction else 0
@@ -1170,7 +1463,7 @@ def triton_turboquant_decode_attention(
                 )
                 host_stage1_us = (time.perf_counter() - t0) * 1e6
                 stage1_custom_op = "ctypes"
-            decode_path = "hip_v52"
+            decode_path = hip_path
         else:
             # Triton fallback (CUDA, FP8 path, or no HIP .so)
             fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
