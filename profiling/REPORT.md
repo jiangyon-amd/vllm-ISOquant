@@ -2040,3 +2040,51 @@ geak_tq_decode/hip_kernel/tq_decode_v63_fused.hip           # 源码
 - **Input=1K, Output=1K, C=20**: 稳态 decode B≈20, seq≈1-2K → 混合, 早期 fused, 后期 split
 - **短上下文高并发 (chatbot)**: B=100+, seq=128-512 → **fused 最大收益场景**
 
+
+## 24. GEAK Stage2 V5 — rocprofv3-driven Optimization (April 2026)
+
+### 24.1 Profiling Methodology
+
+Used `rocprofv3 --kernel-trace` to get GPU-side kernel execution times.
+Identified Stage2 (`tq_decode_stage2_bf16`) as the #1 bottleneck:
+- 42% of total split-path time at B=1
+- 19% of total split-path time at B=128-200
+- Only 42% HBM bandwidth efficiency
+
+### 24.2 GEAK Iterations
+
+| Version | Key Change | VGPRs | Result |
+|---------|-----------|-------|--------|
+| V2 (baseline) | 2-pass max+reduce, 128 threads | 8 | Baseline |
+| V3 | Online softmax 1-pass, warp LSE broadcast | 12 | +6-10% B≥16 |
+| V4 | float4 vector loads, 32 threads | 16 | +79-103% B≥80 |
+| V5 (deployed) | Unified: V3 (B<80) + V4 (B≥80) in C launcher | 12/16 | Best of both |
+
+### 24.3 Stage2 V5 Performance (µs, bf16 output)
+
+| B | V2 (old) | V5 (new) | Speedup |
+|---|----------|----------|---------|
+| 1 | 9.4 | 10.2 | 0.92× |
+| 16 | 11.0 | 10.5 | 1.05× |
+| 64 | 26.4 | 24.2 | 1.09× |
+| 128 | 57.6 | 28.3 | **2.03×** |
+| 200 | 87.1 | 48.6 | **1.79×** |
+
+### 24.4 Adaptive Fused Threshold
+
+rocprofv3 data showed fused kernel wins at much longer sequences for large B.
+Updated from fixed `seq≤512` to B-dependent:
+
+| Batch size | Old threshold | New threshold | Impact |
+|---|---|---|---|
+| B≥32 | 512 | 2048 | +13.2% at B=32,seq=1024 |
+| B≥16 | 512 | 1024 | +9.8% at B=16,seq=1024 |
+| B≥4  | 512 | 384  | +10.0% at B=4,seq=512 (avoid wrong fused) |
+| B<4  | 512 | 256  | More conservative for low CU utilization |
+
+### 24.5 Correctness
+
+13/13 tests pass vs Python reference implementation including:
+- All batch sizes (1-200), split counts (1-32), seq lengths (0-8192)
+- Edge cases: seq=0 (skip), seq=1, seq<splits, 1 split
+- Both bf16 and f32 outputs
