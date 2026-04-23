@@ -193,18 +193,36 @@ def _load_hip_fused():
 # full sequence without excessive serialization, AND the grid (B*Hq) provides
 # enough blocks to fill all CUs.
 #
-# Benchmark-derived crossover (MI355X, Hq=64, Hk=8):
-#   fused wins at seq≤512 for any B, seq≤1024 for B≥32.
-_FUSED_SEQ_THRESHOLD = 512
+# Benchmark-derived crossover (MI355X, Hq=64, Hk=8, rocprofv3 April 2026):
+#   B=4:   fused wins at seq≤384    (conservative: 384)
+#   B=16:  fused wins at seq≤1024
+#   B=32:  fused wins at seq≤2048   (fused always wins)
+#   B=64:  fused wins at seq≤2048+  (fused always wins)
+#
+# The key insight is that higher B provides more blocks (B*Hq) for CU
+# saturation, making the fused kernel's advantage (no mid_o traffic,
+# no Stage2 launch) outweigh the single-block-per-sequence serialization.
 
 
 def _should_use_fused(
     batch_size: int, max_seq_len_hint: int,
 ) -> bool:
-    """Single decision: fused (short seq) or split (long seq)."""
+    """Batch-adaptive fused-vs-split decision.
+
+    Returns True if fused kernel is expected to be faster.
+    Thresholds derived from rocprofv3 profiling on MI355X.
+    """
     if max_seq_len_hint <= 0:
         return False
-    return max_seq_len_hint <= _FUSED_SEQ_THRESHOLD
+    # B-dependent threshold: higher B → fused wins at longer sequences
+    if batch_size >= 32:
+        return max_seq_len_hint <= 2048
+    if batch_size >= 16:
+        return max_seq_len_hint <= 1024
+    if batch_size >= 4:
+        return max_seq_len_hint <= 384
+    # B < 4: very small grid, fused may underutilize CUs
+    return max_seq_len_hint <= 256
 
 
 # (Legacy _should_use_v56 removed — superseded by _should_use_fused)
