@@ -1116,28 +1116,43 @@ def triton_turboquant_decode_attention(
                 buf_holder._tq_output_buf = output
 
         _nc = 1 if norm_correction else 0
-        t0 = time.perf_counter()
-        hip_fused_fn(
-            q_rot.data_ptr(),
-            kv_cache.data_ptr(),
-            block_table.data_ptr(),
-            seq_lens.data_ptr(),
-            centroids_f32.data_ptr(),
-            output.data_ptr(),
-            q_rot.stride(0), q_rot.stride(1),
-            kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
-            block_table.stride(0),
-            output.stride(0), output.stride(1),
-            Hk, block_size, kv_group_size,
-            scale,
-            _nc,
-            B, Hq,
-            ctypes.c_void_p(stream_ptr),
+        _has_fused_op = (
+            hasattr(torch.ops, "tq")
+            and hasattr(torch.ops.tq, "hip_fused")
         )
-        host_stage1_us = (time.perf_counter() - t0) * 1e6
+        if _has_fused_op:
+            t0 = time.perf_counter()
+            torch.ops.tq.hip_fused(
+                q_rot, kv_cache, block_table, seq_lens,
+                centroids_f32, output,
+                Hk, block_size, kv_group_size,
+                scale, _nc,
+            )
+            host_stage1_us = (time.perf_counter() - t0) * 1e6
+            stage1_custom_op = "torch_ops"
+        else:
+            t0 = time.perf_counter()
+            hip_fused_fn(
+                q_rot.data_ptr(),
+                kv_cache.data_ptr(),
+                block_table.data_ptr(),
+                seq_lens.data_ptr(),
+                centroids_f32.data_ptr(),
+                output.data_ptr(),
+                q_rot.stride(0), q_rot.stride(1),
+                kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
+                block_table.stride(0),
+                output.stride(0), output.stride(1),
+                Hk, block_size, kv_group_size,
+                scale,
+                _nc,
+                B, Hq,
+                ctypes.c_void_p(stream_ptr),
+            )
+            host_stage1_us = (time.perf_counter() - t0) * 1e6
+            stage1_custom_op = "ctypes"
         decode_path = "hip_fused"
         stage2_backend = "fused"
-        stage1_custom_op = "ctypes"
         stage2_custom_op = "fused"
 
         record_decode_call(
@@ -1180,26 +1195,41 @@ def triton_turboquant_decode_attention(
 
     if hip_split_fn is not None:
         _nc = 1 if norm_correction else 0
-        t0 = time.perf_counter()
-        hip_split_fn(
-            q_rot.data_ptr(),
-            kv_cache.data_ptr(),
-            block_table.data_ptr(),
-            seq_lens.data_ptr(),
-            centroids_f32.data_ptr(),
-            mid_o.data_ptr(),
-            q_rot.stride(0), q_rot.stride(1),
-            kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
-            block_table.stride(0),
-            mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
-            Hk, block_size, NUM_KV_SPLITS, kv_group_size,
-            scale,
-            _nc,
-            B, Hq,
-            ctypes.c_void_p(stream_ptr),
+        _has_split_op = (
+            hasattr(torch.ops, "tq")
+            and hasattr(torch.ops.tq, "hip_stage1_split")
         )
-        host_stage1_us = (time.perf_counter() - t0) * 1e6
-        stage1_custom_op = "ctypes"
+        if _has_split_op:
+            t0 = time.perf_counter()
+            torch.ops.tq.hip_stage1_split(
+                q_rot, kv_cache, block_table, seq_lens,
+                centroids_f32, mid_o,
+                Hk, block_size, NUM_KV_SPLITS, kv_group_size,
+                scale, _nc,
+            )
+            host_stage1_us = (time.perf_counter() - t0) * 1e6
+            stage1_custom_op = "torch_ops"
+        else:
+            t0 = time.perf_counter()
+            hip_split_fn(
+                q_rot.data_ptr(),
+                kv_cache.data_ptr(),
+                block_table.data_ptr(),
+                seq_lens.data_ptr(),
+                centroids_f32.data_ptr(),
+                mid_o.data_ptr(),
+                q_rot.stride(0), q_rot.stride(1),
+                kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
+                block_table.stride(0),
+                mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+                Hk, block_size, NUM_KV_SPLITS, kv_group_size,
+                scale,
+                _nc,
+                B, Hq,
+                ctypes.c_void_p(stream_ptr),
+            )
+            host_stage1_us = (time.perf_counter() - t0) * 1e6
+            stage1_custom_op = "ctypes"
         decode_path = "hip_split"
     else:
         # Triton fallback (CUDA, FP8 path, or no HIP .so)
