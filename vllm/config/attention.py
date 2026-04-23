@@ -30,7 +30,18 @@ class AttentionConfig:
     tq_max_kv_splits_for_cuda_graph: int = 32
     """TurboQuant max NUM_KV_SPLITS for cuda graph decode.
     Fixes the split count so grid dimensions are constant across captures,
-    and buffers can be pre-allocated to avoid inflating the memory estimate."""
+    and buffers can be pre-allocated to avoid inflating the memory estimate.
+    Long-context decode on MI355X is materially faster with 32 splits than 8."""
+
+    tq_max_kv_splits_for_eager: int = 32
+    """TurboQuant max NUM_KV_SPLITS for eager decode.
+    Keep this high enough for long-context decode so the adaptive heuristic can
+    pick a larger split count without changing the cudagraph cap."""
+
+    tq_v56_max_seq_len: int = 0
+    """Deprecated: V56 GEMV-fused path has been superseded by the unified
+    fused/split dispatch.  Kept for config-file backward compatibility;
+    has no runtime effect."""
 
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""

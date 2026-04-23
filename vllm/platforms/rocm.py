@@ -441,6 +441,28 @@ class RocmPlatform(Platform):
         valid_backends_priorities = []
         invalid_reasons = {}
 
+        # TurboQuant KV cache: prefer TQ backend but still validate it.
+        # The old code returned immediately, skipping validate_configuration()
+        # and letting incompatible configs (e.g. ENCODER attn_type, use_mla,
+        # unsupported block_size) through.
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith(
+                "turboquant_"):
+            try:
+                tq_cls = AttentionBackendEnum.TURBOQUANT.get_class()
+                tq_invalid = tq_cls.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                tq_invalid = ["ImportError"]
+            if tq_invalid:
+                # TQ requested but config is invalid — fall through to
+                # normal backend selection so the caller gets a clear error.
+                invalid_reasons[AttentionBackendEnum.TURBOQUANT] = tq_invalid
+            else:
+                return [(AttentionBackendEnum.TURBOQUANT, 0)], {}
+
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
