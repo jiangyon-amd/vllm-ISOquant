@@ -38,24 +38,14 @@ _HIP_STAGE2_LIB = None
 _HIP_STAGE2_BF16_FN = None
 _HIP_STAGE2_F32_FN = None
 
-# Legacy loaders kept as fallback aliases (loaded on demand, same ABI)
-_HIP_STAGE1_LIB = None
-_HIP_STAGE1_FN = None
-_HIP_STAGE1_8WARP_LIB = None
-_HIP_STAGE1_8WARP_FN = None
-_HIP_STAGE1_4WARP_LIB = None
-_HIP_STAGE1_4WARP_FN = None
-_HIP_V56_LIB = None
-_HIP_V56_FN = None
+# (Legacy loader state removed — unified into _HIP_SPLIT/FUSED above)
 
 _WARNED_HIP_SO_KEYS: set[str] = set()
 
 _DISABLE_HIP_SO = os.environ.get("TQ_DISABLE_HIP_SO", "0") == "1"
 _ALLOW_STALE_HIP_SO = os.environ.get("TQ_ALLOW_STALE_HIP_SO", "0") == "1"
 
-# Legacy threshold — kept for backward compatibility but not used in
-# the simplified dispatch.
-_V56_BATCH_THRESHOLD = 4
+# (Legacy V56 threshold removed — superseded by _FUSED_SEQ_THRESHOLD)
 
 
 def _warn_hip_so_once(key: str, message: str) -> None:
@@ -217,13 +207,7 @@ def _should_use_fused(
     return max_seq_len_hint <= _FUSED_SEQ_THRESHOLD
 
 
-# Legacy — kept for backward compat but not used in simplified dispatch
-def _should_use_v56(
-    batch_size: int,
-    max_seq_len_hint: int,
-    v56_max_seq_len: int,
-) -> bool:
-    return False  # disabled in unified architecture
+# (Legacy _should_use_v56 removed — superseded by _should_use_fused)
 
 
 def _resolve_num_kv_splits(
@@ -246,19 +230,16 @@ def _resolve_num_kv_splits(
     # Prefer more splits once context exceeds 1K, while keeping small-context
     # batches closer to the old behavior.
     if max_seq_len_hint >= 4096:
-        suggested = eager_cap
-        return max(1, min(eager_cap, suggested))
+        return eager_cap
     if max_seq_len_hint >= 2048:
         suggested = 16 if batch_size >= 16 else eager_cap
-        return max(1, min(eager_cap, suggested))
+        return min(eager_cap, suggested)
     if max_seq_len_hint >= 1024:
-        suggested = 16
-        return max(1, min(eager_cap, suggested))
+        return min(eager_cap, 16)
 
     target_tokens_per_split = 64
-
     suggested = max(1, math.ceil(max_seq_len_hint / target_tokens_per_split))
-    return max(1, min(eager_cap, suggested))
+    return min(eager_cap, suggested)
 
 
 def _load_hip_stage2():
@@ -339,9 +320,9 @@ def _register_hip_custom_ops():
     if not current_platform.is_rocm() or register_fake is None:
         return
 
-    # --- HIP Stage1 v52 ---
-    @torch.library.custom_op("tq::hip_stage1_v52", mutates_args=("mid_o",))
-    def hip_stage1_v52(
+    # --- HIP Stage1 split (4-warp, unified) ---
+    @torch.library.custom_op("tq::hip_stage1_split", mutates_args=("mid_o",))
+    def hip_stage1_split(
         q_rot: torch.Tensor,
         kv_cache: torch.Tensor,
         block_table: torch.Tensor,
@@ -355,7 +336,7 @@ def _register_hip_custom_ops():
         attn_scale: float,
         norm_correction: int,
     ) -> None:
-        fn = _load_hip_stage1()
+        fn = _load_hip_split()
         if fn is None:
             return
         B, Hq = q_rot.shape[0], q_rot.shape[1]
@@ -378,62 +359,57 @@ def _register_hip_custom_ops():
             ctypes.c_void_p(stream_ptr),
         )
 
-    @register_fake("tq::hip_stage1_v52")
-    def hip_stage1_v52_fake(
+    @register_fake("tq::hip_stage1_split")
+    def hip_stage1_split_fake(
         q_rot, kv_cache, block_table, seq_lens, centroids, mid_o,
         num_kv_heads, block_size, num_kv_splits, kv_group_size,
         attn_scale, norm_correction,
     ) -> None:
         return None
 
-    # --- HIP Stage1 v56 (GEMV-fused) ---
-    @torch.library.custom_op("tq::hip_stage1_v56", mutates_args=("mid_o",))
-    def hip_stage1_v56(
-        query: torch.Tensor,
-        PiT: torch.Tensor,
+    # --- HIP Fused Stage1+Stage2 (8-warp, bf16 output) ---
+    @torch.library.custom_op("tq::hip_fused", mutates_args=("output",))
+    def hip_fused(
+        q_rot: torch.Tensor,
         kv_cache: torch.Tensor,
         block_table: torch.Tensor,
         seq_lens: torch.Tensor,
         centroids: torch.Tensor,
-        mid_o: torch.Tensor,
+        output: torch.Tensor,
         num_kv_heads: int,
         block_size: int,
-        num_kv_splits: int,
         kv_group_size: int,
         attn_scale: float,
-        query_dtype: int,
         norm_correction: int,
     ) -> None:
-        fn = _load_hip_v56()
+        fn = _load_hip_fused()
         if fn is None:
             return
-        B, Hq = query.shape[0], query.shape[1]
-        stream_ptr = torch.cuda.current_stream(query.device).cuda_stream
+        B, Hq = q_rot.shape[0], q_rot.shape[1]
+        stream_ptr = torch.cuda.current_stream(q_rot.device).cuda_stream
         fn(
-            query.data_ptr(),
-            PiT.data_ptr(),
+            q_rot.data_ptr(),
             kv_cache.data_ptr(),
             block_table.data_ptr(),
             seq_lens.data_ptr(),
             centroids.data_ptr(),
-            mid_o.data_ptr(),
-            query.stride(0), query.stride(1),
+            output.data_ptr(),
+            q_rot.stride(0), q_rot.stride(1),
             kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
             block_table.stride(0),
-            mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
-            num_kv_heads, block_size, num_kv_splits, kv_group_size,
+            output.stride(0), output.stride(1),
+            num_kv_heads, block_size, kv_group_size,
             attn_scale,
-            query_dtype,
             norm_correction,
             B, Hq,
             ctypes.c_void_p(stream_ptr),
         )
 
-    @register_fake("tq::hip_stage1_v56")
-    def hip_stage1_v56_fake(
-        query, PiT, kv_cache, block_table, seq_lens, centroids, mid_o,
-        num_kv_heads, block_size, num_kv_splits, kv_group_size,
-        attn_scale, query_dtype, norm_correction,
+    @register_fake("tq::hip_fused")
+    def hip_fused_fake(
+        q_rot, kv_cache, block_table, seq_lens, centroids, output,
+        num_kv_heads, block_size, kv_group_size,
+        attn_scale, norm_correction,
     ) -> None:
         return None
 
@@ -1071,16 +1047,14 @@ def triton_turboquant_decode_attention(
         PiT = Pi.T.contiguous()
 
     # -------------------------------------------------------------------
-    # Stage 1: Adaptive kernel selection
-    # - V56 (GEMV-fused): for small B on MSE path — eliminates GEMM launch
-    # - V52 (separate GEMM + HIP Stage1): for large B — more efficient GEMM
-    # - Triton: fallback for CUDA, FP8 path, or no HIP .so
+    # Stage 1: Kernel dispatch (3 paths)
+    # - FUSED:  short seq (≤512), Grid=(B,Hq), bf16 output, no mid_o
+    # - SPLIT:  long seq,  Grid=(B,Hq,splits), 4-warp, mid_o → Stage2
+    # - TRITON: fallback for CUDA, FP8 path, or no HIP .so
     #
-    # HIP kernels (v52/v56) hardcode HEAD_DIM=128, MSE_BYTES=64 (4-bit),
+    # HIP kernels hardcode HEAD_DIM=128, MSE_BYTES=64 (4-bit MSE),
     # KPS=68, VAL_DATA_BYTES=64 (4-bit values).
     # block_size must be power-of-2 (16/32/64/128).
-    # query dtype can be bf16 or fp16 (v56 handles via query_dtype flag,
-    # v52 takes float32 q_rot so dtype doesn't matter).
     # -------------------------------------------------------------------
     stream_ptr = torch.cuda.current_stream(device).cuda_stream
 
@@ -1114,7 +1088,7 @@ def triton_turboquant_decode_attention(
     ) else None
 
     if hip_fused_fn is not None:
-        # Need q_rot for the fused kernel (same as v52 path)
+        # Need q_rot for the fused kernel (same as split path)
         if q_rot_buf is not None and q_rot_buf.shape[0] >= B:
             q_rot = q_rot_buf[:B]
             q_flat = query.reshape(B * Hq, D).float()
@@ -1228,48 +1202,48 @@ def triton_turboquant_decode_attention(
         stage1_custom_op = "ctypes"
         decode_path = "hip_split"
     else:
-            # Triton fallback (CUDA, FP8 path, or no HIP .so)
-            fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
-            BLOCK_KV = 4
-            grid = (B, Hq, NUM_KV_SPLITS)
-            t0 = time.perf_counter()
-            _tq_decode_stage1[grid](
-                q_rot,
-                kv_cache,
-                block_table,
-                seq_lens,
-                centroids,
-                mid_o,
-                q_rot.stride(0),
-                q_rot.stride(1),
-                kv_cache.stride(0),
-                kv_cache.stride(1),
-                kv_cache.stride(2),
-                block_table.stride(0),
-                mid_o.stride(0),
-                mid_o.stride(1),
-                mid_o.stride(2),
-                NUM_KV_HEADS=Hk,
-                HEAD_DIM=D,
-                BLOCK_SIZE=block_size,
-                NUM_KV_SPLITS=NUM_KV_SPLITS,
-                KV_GROUP_SIZE=kv_group_size,
-                MSE_BITS=mse_bits,
-                MSE_BYTES=cfg["mse_bytes"],
-                KPS=key_packed_size,
-                VQB=value_quant_bits,
-                VAL_DATA_BYTES=cfg["val_data_bytes"],
-                ATTN_SCALE=scale,
-                BLOCK_D=cfg["BLOCK_D"],
-                BLOCK_KV=BLOCK_KV,
-                KEY_FP8=1 if key_fp8 else 0,
-                NORM_CORRECTION=1 if norm_correction else 0,
-                FP8_E4B15=fp8_e4b15,
-                num_warps=1,
-                num_stages=1,
-            )
-            host_stage1_us = (time.perf_counter() - t0) * 1e6
-            decode_path = "triton_stage1"
+        # Triton fallback (CUDA, FP8 path, or no HIP .so)
+        fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
+        BLOCK_KV = 4
+        grid = (B, Hq, NUM_KV_SPLITS)
+        t0 = time.perf_counter()
+        _tq_decode_stage1[grid](
+            q_rot,
+            kv_cache,
+            block_table,
+            seq_lens,
+            centroids,
+            mid_o,
+            q_rot.stride(0),
+            q_rot.stride(1),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            NUM_KV_HEADS=Hk,
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group_size,
+            MSE_BITS=mse_bits,
+            MSE_BYTES=cfg["mse_bytes"],
+            KPS=key_packed_size,
+            VQB=value_quant_bits,
+            VAL_DATA_BYTES=cfg["val_data_bytes"],
+            ATTN_SCALE=scale,
+            BLOCK_D=cfg["BLOCK_D"],
+            BLOCK_KV=BLOCK_KV,
+            KEY_FP8=1 if key_fp8 else 0,
+            NORM_CORRECTION=1 if norm_correction else 0,
+            FP8_E4B15=fp8_e4b15,
+            num_warps=1,
+            num_stages=1,
+        )
+        host_stage1_us = (time.perf_counter() - t0) * 1e6
+        decode_path = "triton_stage1"
 
     # -------------------------------------------------------------------
     # Stage 2: Reduce across KV splits
