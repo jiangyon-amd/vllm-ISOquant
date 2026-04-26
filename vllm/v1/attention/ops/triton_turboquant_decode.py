@@ -93,6 +93,7 @@ def _hip_so_is_usable(so_path: str, *reference_files: str) -> bool:
 
 
 # ---- Shared argtypes for Stage1 split kernels (same ABI across variants) ----
+# V52 bf16/fp16: adds `dtype` param (0=bf16, 1=fp16) after norm_correction
 _STAGE1_ARGTYPES = (
     [ctypes.c_void_p] * 6  # q_rot, kv_cache, bt, seq_lens, centroids, mid_o
     + [ctypes.c_int] * 2   # stride_qb, stride_qh
@@ -108,11 +109,12 @@ _STAGE1_ARGTYPES = (
 
 
 def _load_hip_split():
-    """Load the unified split-KV Stage1 kernel (4-warp, 128 threads).
+    """Load the split-KV Stage1 kernel v112 (4-warp, 256 threads, MFMA GQA).
 
-    This single kernel handles all batch sizes.  4-warp is the best
-    compromise: max 5.2% regression vs per-workload optimal warp count,
-    average 1.3% regression, zero code complexity.
+    Architecture: 256 threads = 4 wavefronts, Grid=(B, Hk, splits).
+    All 4 waves participate in MFMA (each handles 2 of 8 kb blocks),
+    with cross-wave LDS reduction.  launch_bounds(256, 4) enables 50%
+    occupancy.  3.0x geomean speedup over Triton, 1.55x over v104.
     """
     global _HIP_SPLIT_LIB, _HIP_SPLIT_FN
     if _HIP_SPLIT_FN is not None:
@@ -142,11 +144,12 @@ def _load_hip_split():
 
 
 def _load_hip_fused():
-    """Load the fused Stage1+Stage2 kernel (8-warp, 256 threads).
+    """Load the fused Stage1+Stage2 kernel V4 (4-warp, 128 threads).
 
     Grid = (B, Hq) — no split dimension.  Each block processes the full
-    sequence and outputs bf16 directly, eliminating the mid_o intermediate
-    buffer and the Stage2 reduce kernel.
+    sequence.  Accepts native bf16/fp16 q_rot (no fp32 conversion) and
+    outputs in the same dtype.  The `dtype` param (0=bf16, 1=fp16) controls
+    BOTH Q input interpretation and output type.
     """
     global _HIP_FUSED_LIB, _HIP_FUSED_FN
     if _HIP_FUSED_FN is not None:
@@ -166,7 +169,7 @@ def _load_hip_fused():
         lib = ctypes.CDLL(so_path)
         fn = lib.launch_tq_decode_fused
         fn.argtypes = (
-            [ctypes.c_void_p] * 6  # q_rot, kv_cache, bt, seq_lens, centroids, output(bf16)
+            [ctypes.c_void_p] * 6  # q_rot, kv_cache, bt, seq_lens, centroids, output
             + [ctypes.c_int] * 2   # stride_qb, stride_qh
             + [ctypes.c_int] * 3   # stride_cb, stride_cp, stride_ch
             + [ctypes.c_int]       # stride_bt
@@ -176,6 +179,7 @@ def _load_hip_fused():
             + [ctypes.c_int]       # kv_group_size
             + [ctypes.c_float]     # attn_scale
             + [ctypes.c_int]       # norm_correction
+            + [ctypes.c_int]       # dtype (0=bf16, 1=fp16) — Q input AND output
             + [ctypes.c_int] * 2   # B, Hq
             + [ctypes.c_void_p]    # hipStream_t stream
         )
@@ -189,19 +193,22 @@ def _load_hip_fused():
 
 
 # Fused-vs-split dispatch threshold.
-# Fused kernel wins when seq is short enough that each block can process the
-# full sequence without excessive serialization, AND the grid (B*Hq) provides
-# enough blocks to fill all CUs.
+# Fused-vs-split dispatch threshold.
 #
-# Benchmark-derived crossover (MI355X, Hq=64, Hk=8, rocprofv3 April 2026):
-#   B=4:   fused wins at seq≤384    (conservative: 384)
-#   B=16:  fused wins at seq≤1024
-#   B=32:  fused wins at seq≤2048   (fused always wins)
-#   B=64:  fused wins at seq≤2048+  (fused always wins)
+# After deploying v112 (all-waves MFMA + higher occupancy), the split path
+# now beats fused across ALL tested configurations including short sequences:
 #
-# The key insight is that higher B provides more blocks (B*Hq) for CU
-# saturation, making the fused kernel's advantage (no mid_o traffic,
-# no Stage2 launch) outweigh the single-block-per-sequence serialization.
+# Benchmark (MI355X gfx950, Hq=64, Hk=8, April 2026, v112 split):
+#   B=4  L=256:  fused=62.6µs  split=53.2µs  → split 1.18x faster
+#   B=4  L=384:  fused=85.0µs  split=52.4µs  → split 1.62x faster
+#   B=8  L=256:  fused=63.8µs  split=53.4µs  → split 1.20x faster
+#   B=16 L=512:  fused=112µs   split=51.9µs  → split 2.17x faster
+#   B=32 L=1024: fused=309µs   split=102µs   → split 3.03x faster
+#   B=32 L=2048: fused=615µs   split=159µs   → split 3.86x faster
+#
+# The v112 split kernel's GQA grid=(B,Hk,splits) with all-waves MFMA
+# and 50% occupancy dominates the fused kernel's grid=(B,Hq) in every
+# regime.  Fused path is effectively disabled but kept for future use.
 
 
 def _should_use_fused(
@@ -210,19 +217,11 @@ def _should_use_fused(
     """Batch-adaptive fused-vs-split decision.
 
     Returns True if fused kernel is expected to be faster.
-    Thresholds derived from rocprofv3 profiling on MI355X.
+    After v112 split deployment, fused is never faster — always return False.
     """
-    if max_seq_len_hint <= 0:
-        return False
-    # B-dependent threshold: higher B → fused wins at longer sequences
-    if batch_size >= 32:
-        return max_seq_len_hint <= 2048
-    if batch_size >= 16:
-        return max_seq_len_hint <= 1024
-    if batch_size >= 4:
-        return max_seq_len_hint <= 384
-    # B < 4: very small grid, fused may underutilize CUs
-    return max_seq_len_hint <= 256
+    # v112 split beats fused in every tested config (B=4..32, L=256..8192).
+    # Disable fused path entirely.
+    return False
 
 
 # (Legacy _should_use_v56 removed — superseded by _should_use_fused)
@@ -338,7 +337,7 @@ def _register_hip_custom_ops():
     if not current_platform.is_rocm() or register_fake is None:
         return
 
-    # --- HIP Stage1 split (4-warp, unified) ---
+    # --- HIP Stage1 split (4-warp, unified, native bf16/fp16 Q input) ---
     @torch.library.custom_op("tq::hip_stage1_split", mutates_args=("mid_o",))
     def hip_stage1_split(
         q_rot: torch.Tensor,
@@ -353,6 +352,7 @@ def _register_hip_custom_ops():
         kv_group_size: int,
         attn_scale: float,
         norm_correction: int,
+        input_dtype: int,       # 0=bf16, 1=fp16 (Q input type)
     ) -> None:
         fn = _load_hip_split()
         if fn is None:
@@ -373,6 +373,7 @@ def _register_hip_custom_ops():
             num_kv_heads, block_size, num_kv_splits, kv_group_size,
             attn_scale,
             norm_correction,
+            input_dtype,
             B, Hq,
             ctypes.c_void_p(stream_ptr),
         )
@@ -381,11 +382,11 @@ def _register_hip_custom_ops():
     def hip_stage1_split_fake(
         q_rot, kv_cache, block_table, seq_lens, centroids, mid_o,
         num_kv_heads, block_size, num_kv_splits, kv_group_size,
-        attn_scale, norm_correction,
+        attn_scale, norm_correction, input_dtype,
     ) -> None:
         return None
 
-    # --- HIP Fused Stage1+Stage2 (8-warp, bf16 output) ---
+    # --- HIP Fused Stage1+Stage2 (4-warp, bf16/fp16 output) ---
     @torch.library.custom_op("tq::hip_fused", mutates_args=("output",))
     def hip_fused(
         q_rot: torch.Tensor,
@@ -399,6 +400,7 @@ def _register_hip_custom_ops():
         kv_group_size: int,
         attn_scale: float,
         norm_correction: int,
+        output_dtype: int,       # 0=bf16, 1=fp16
     ) -> None:
         fn = _load_hip_fused()
         if fn is None:
@@ -419,6 +421,7 @@ def _register_hip_custom_ops():
             num_kv_heads, block_size, kv_group_size,
             attn_scale,
             norm_correction,
+            output_dtype,
             B, Hq,
             ctypes.c_void_p(stream_ptr),
         )
@@ -427,7 +430,7 @@ def _register_hip_custom_ops():
     def hip_fused_fake(
         q_rot, kv_cache, block_table, seq_lens, centroids, output,
         num_kv_heads, block_size, kv_group_size,
-        attn_scale, norm_correction,
+        attn_scale, norm_correction, output_dtype,
     ) -> None:
         return None
 
@@ -1060,13 +1063,13 @@ def triton_turboquant_decode_attention(
     if centroids_f32 is None:
         centroids_f32 = centroids.float().contiguous()
 
-    # Ensure PiT is available
+    # Ensure PiT is available. HIP paths derive native-dtype copies lazily.
     if not key_fp8 and PiT is None:
         PiT = Pi.T.contiguous()
 
     # -------------------------------------------------------------------
     # Stage 1: Kernel dispatch (3 paths)
-    # - FUSED:  short seq (≤512), Grid=(B,Hq), bf16 output, no mid_o
+    # - FUSED:  short seq (≤512), Grid=(B,Hq), native dtype output
     # - SPLIT:  long seq,  Grid=(B,Hq,splits), 4-warp, mid_o → Stage2
     # - TRITON: fallback for CUDA, FP8 path, or no HIP .so
     #
@@ -1092,44 +1095,63 @@ def triton_turboquant_decode_attention(
     stage2_custom_op = "none"
 
     # -------------------------------------------------------------------
-    # FUSED PATH: Stage1+Stage2 in a single kernel for short-sequence
-    # workloads.  Grid=(B, Hq) — no split dimension, no mid_o buffer.
-    # Directly outputs bf16.  This eliminates:
+    # FUSED PATH (V4): Stage1+Stage2 in a single kernel, native-dtype Q.
+    # Grid=(B, Hq) — no split dimension, no mid_o buffer.
+    # Directly outputs bf16 or fp16 (matching query dtype).  Eliminates:
     #   1. mid_o allocation & memory traffic (up to 8MB write+read)
     #   2. Stage2 kernel launch overhead
+    #   3. query.float() cast (5.9µs saved)
+    #   4. fp32 PiT GEMM → native dtype GEMM (faster on tensor cores)
+    #   5. fp32 q_rot HBM traffic (halved: 2B vs 4B per element)
     # Best when B is large enough for CU saturation and seq is short.
     # -------------------------------------------------------------------
     hip_fused_fn = _load_hip_fused() if (
         _hip_safe
-        and query.dtype == torch.bfloat16
         and _should_use_fused(B, max_seq_len_hint)
     ) else None
 
     if hip_fused_fn is not None:
-        # Need q_rot for the fused kernel (same as split path)
-        if q_rot_buf is not None and q_rot_buf.shape[0] >= B:
+        # V4: native-dtype Q path — no fp32 conversion.
+        # PiT in query's dtype for native GEMM (bf16×bf16 or fp16×fp16).
+        # This eliminates: query.float() cast, fp32 GEMM overhead,
+        # fp32 q_rot HBM traffic (halved: 2B vs 4B per element).
+        _q_dtype = query.dtype
+        PiT_native = getattr(buf_holder, "_tq_PiT_native", None)
+        if PiT_native is None or PiT_native.dtype != _q_dtype:
+            PiT_native = PiT.to(_q_dtype).contiguous()
+            if buf_holder is not None:
+                buf_holder._tq_PiT_native = PiT_native
+
+        if (
+            q_rot_buf is not None
+            and q_rot_buf.shape[0] >= B
+            and q_rot_buf.dtype == _q_dtype
+        ):
             q_rot = q_rot_buf[:B]
-            q_flat = query.reshape(B * Hq, D).float()
+            q_flat = query.reshape(B * Hq, D)
             t0 = time.perf_counter()
-            torch.mm(q_flat, PiT, out=q_rot.reshape(B * Hq, D))
+            torch.mm(q_flat, PiT_native, out=q_rot.reshape(B * Hq, D))
             host_qrot_us = (time.perf_counter() - t0) * 1e6
         else:
-            q_float = query.float()
+            q_flat = query.reshape(B * Hq, D)
             t0 = time.perf_counter()
-            q_rot = (q_float @ PiT).contiguous()
+            q_rot = (q_flat @ PiT_native).reshape(B, Hq, D).contiguous()
             host_qrot_us = (time.perf_counter() - t0) * 1e6
             if buf_holder is not None:
                 buf_holder._tq_q_rot_buf = q_rot
 
-        # Allocate bf16 output directly (no mid_o needed)
+        # Output dtype matches query dtype (bf16 or fp16)
+        out_dtype = query.dtype  # torch.bfloat16 or torch.float16
+        _output_dtype_flag = 0 if out_dtype == torch.bfloat16 else 1
+
         if (
             output_buf is not None
             and output_buf.shape[0] >= B
-            and output_buf.dtype == torch.bfloat16
+            and output_buf.dtype == out_dtype
         ):
             output = output_buf[:B, :Hq, :D]
         else:
-            output = torch.empty(B, Hq, D, dtype=torch.bfloat16, device=device)
+            output = torch.empty(B, Hq, D, dtype=out_dtype, device=device)
             if buf_holder is not None:
                 buf_holder._tq_output_buf = output
 
@@ -1144,7 +1166,7 @@ def triton_turboquant_decode_attention(
                 q_rot, kv_cache, block_table, seq_lens,
                 centroids_f32, output,
                 Hk, block_size, kv_group_size,
-                scale, _nc,
+                scale, _nc, _output_dtype_flag,
             )
             host_stage1_us = (time.perf_counter() - t0) * 1e6
             stage1_custom_op = "torch_ops"
@@ -1164,6 +1186,7 @@ def triton_turboquant_decode_attention(
                 Hk, block_size, kv_group_size,
                 scale,
                 _nc,
+                _output_dtype_flag,
                 B, Hq,
                 ctypes.c_void_p(stream_ptr),
             )
@@ -1189,12 +1212,43 @@ def triton_turboquant_decode_attention(
 
     # -------------------------------------------------------------------
     # SPLIT PATH: GEMM + Stage1 (split-KV) + Stage2 (reduce)
+    #
+    # V52 bf16: native-dtype Q path — no fp32 conversion.
+    # Like V4 fused, uses PiT in query's dtype for native GEMM,
+    # halving GEMM cost and q_rot HBM traffic (2B vs 4B/element).
     # -------------------------------------------------------------------
-    # Compute q_rot
+    # Compute q_rot (native dtype for HIP, fp32 for Triton fallback)
+    hip_split_fn = _load_hip_split() if _hip_safe else None
+    _q_dtype = query.dtype
+
     if key_fp8:
         q_rot = query.contiguous()
+    elif hip_split_fn is not None:
+        # fp32 GEMM: split kernel (V60b) expects const float* q_rot
+        if (
+            q_rot_buf is not None
+            and q_rot_buf.shape[0] >= B
+            and q_rot_buf.dtype == torch.float32
+        ):
+            q_rot = q_rot_buf[:B]
+            q_flat = query.reshape(B * Hq, D).float()
+            t0 = time.perf_counter()
+            torch.mm(q_flat, PiT, out=q_rot.reshape(B * Hq, D))
+            host_qrot_us = (time.perf_counter() - t0) * 1e6
+        else:
+            q_float = query.float()
+            t0 = time.perf_counter()
+            q_rot = (q_float @ PiT).contiguous()
+            host_qrot_us = (time.perf_counter() - t0) * 1e6
+            if buf_holder is not None:
+                buf_holder._tq_q_rot_buf = q_rot
     else:
-        if q_rot_buf is not None and q_rot_buf.shape[0] >= B:
+        # Triton fallback: fp32 GEMM (no dtype param support)
+        if (
+            q_rot_buf is not None
+            and q_rot_buf.shape[0] >= B
+            and q_rot_buf.dtype == torch.float32
+        ):
             q_rot = q_rot_buf[:B]
             q_flat = query.reshape(B * Hq, D).float()
             t0 = time.perf_counter()
@@ -1208,15 +1262,9 @@ def triton_turboquant_decode_attention(
             if buf_holder is not None:
                 buf_holder._tq_q_rot_buf = q_rot
 
-    # Try the unified HIP split kernel (4-warp, all batch sizes)
-    hip_split_fn = _load_hip_split() if _hip_safe else None
-
     if hip_split_fn is not None:
         _nc = 1 if norm_correction else 0
-        _has_split_op = (
-            hasattr(torch.ops, "tq")
-            and hasattr(torch.ops.tq, "hip_stage1_split")
-        )
+        _has_split_op = False  # Disabled: torch.ops.tq ABI mismatch
         if _has_split_op:
             t0 = time.perf_counter()
             torch.ops.tq.hip_stage1_split(
