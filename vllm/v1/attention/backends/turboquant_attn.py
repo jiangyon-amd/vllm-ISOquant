@@ -43,6 +43,10 @@ from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_stor
 # load (489ms vs 338ms). Enable via TQ_STREAM_OVERLAP=1 for experimentation.
 _USE_STREAM_OVERLAP = os.environ.get("TQ_STREAM_OVERLAP", "0") == "1"
 
+# Experimental full-stack fusion path. This keeps the current production path
+# untouched and only switches the implementation class when the env flag is set.
+_USE_TQ_FUSION_V3_HIP = os.environ.get("VLLM_TQ_FUSION_V3_HIP", "0") == "1"
+
 # Per-step batch mode flag: set by TurboQuantMetadataBuilder.build() so that
 # do_kv_cache_update can detect pure-decode steps without receiving metadata.
 # True = current step is pure decode (max_query_len == 1, no prefill tokens).
@@ -127,6 +131,12 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["TurboQuantAttentionImpl"]:
+        if _USE_TQ_FUSION_V3_HIP:
+            from vllm.v1.attention.ops.tq_fusion_v3_hip import (
+                FusionTurboQuantAttentionImpl,
+            )
+
+            return FusionTurboQuantAttentionImpl
         return TurboQuantAttentionImpl
 
     @staticmethod

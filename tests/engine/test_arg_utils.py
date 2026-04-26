@@ -332,6 +332,12 @@ def test_attention_config():
             "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
+            "--attention-config.tq_max_kv_splits_for_cuda_graph",
+            "8",
+            "--attention-config.tq_max_kv_splits_for_eager",
+            "4",
+            "--attention-config.tq_v56_max_seq_len",
+            "1024",
             "--attention-config.use_cudnn_prefill",
             "true",
             "--attention-config.use_trtllm_ragged_deepseek_prefill",
@@ -351,6 +357,9 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 3
     assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
+    assert engine_args.attention_config.tq_max_kv_splits_for_cuda_graph == 8
+    assert engine_args.attention_config.tq_max_kv_splits_for_eager == 4
+    assert engine_args.attention_config.tq_v56_max_seq_len == 1024
     assert engine_args.attention_config.use_cudnn_prefill is True
     assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
     assert engine_args.attention_config.use_trtllm_attention is True
@@ -364,6 +373,9 @@ def test_attention_config():
             '{"backend": "FLASHINFER", "flash_attn_version": 2, '
             '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
+            '"tq_max_kv_splits_for_cuda_graph": 4, '
+            '"tq_max_kv_splits_for_eager": 2, '
+            '"tq_v56_max_seq_len": 1536, '
             '"use_cudnn_prefill": false, '
             '"use_trtllm_ragged_deepseek_prefill": false, '
             '"use_trtllm_attention": false, '
@@ -378,6 +390,9 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 2
     assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
+    assert engine_args.attention_config.tq_max_kv_splits_for_cuda_graph == 4
+    assert engine_args.attention_config.tq_max_kv_splits_for_eager == 2
+    assert engine_args.attention_config.tq_v56_max_seq_len == 1536
     assert engine_args.attention_config.use_cudnn_prefill is False
     assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is False
     assert engine_args.attention_config.use_trtllm_attention is False
@@ -411,7 +426,6 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER
-
     # test --attention-backend and --attention-config.backend are mutually exclusive
     args = parser.parse_args(
         [
@@ -427,6 +441,20 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
         engine_args.create_engine_config()
+
+
+def test_scheduler_tq_decode_prefill_flag():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        ["--tq-defer-waiting-prefills-for-running-decodes", "true"]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.tq_defer_waiting_prefills_for_running_decodes is True
+    vllm_config = engine_args.create_engine_config()
+    assert (
+        vllm_config.scheduler_config.tq_defer_waiting_prefills_for_running_decodes
+        is True
+    )
 
 
 def test_prefix_cache_default():

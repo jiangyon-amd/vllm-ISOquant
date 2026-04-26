@@ -147,6 +147,12 @@ class SchedulerConfig:
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
 
+    tq_defer_waiting_prefills_for_running_decodes: bool = False
+    """When enabled, prefer decode-only steps once running requests have
+    entered decode. This is a TurboQuant-specific latency/throughput trade-off
+    for long-context decode workloads; new prefills stay queued until the
+    current decode wave yields."""
+
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,

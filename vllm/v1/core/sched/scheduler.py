@@ -560,6 +560,15 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        defer_waiting_prefills = (
+            self.scheduler_config.tq_defer_waiting_prefills_for_running_decodes
+            and any(
+                self._request_is_decode_phase(req)
+                for req in scheduled_running_reqs
+            )
+        )
+        deferred_prefills = create_request_queue(self.policy)
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
@@ -600,6 +609,18 @@ class Scheduler(SchedulerInterface):
                     # Scheduling would exceed max_loras, skip.
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
+                    continue
+
+                if (
+                    defer_waiting_prefills
+                    and self._request_is_prefill_phase(request)
+                ):
+                    request_queue.pop_request()
+                    # Use prepend_request here so that prepend_requests() below
+                    # restores the original FCFS order.
+                    deferred_prefills.prepend_request(request)
+                    if not self._has_waiting_decode_candidate():
+                        break
                     continue
 
                 num_external_computed_tokens = 0
@@ -846,6 +867,8 @@ class Scheduler(SchedulerInterface):
                             self.ec_connector.update_state_after_alloc(request, i)
 
             # re-queue requests skipped in this pass ahead of older skipped items.
+            if deferred_prefills:
+                self.waiting.prepend_requests(deferred_prefills)
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
 
@@ -1563,6 +1586,20 @@ class Scheduler(SchedulerInterface):
             RequestStatus.WAITING_FOR_REMOTE_KVS,
             RequestStatus.WAITING_FOR_STREAMING_REQ,
         )
+
+    @staticmethod
+    def _request_is_decode_phase(request: Request) -> bool:
+        return request.num_computed_tokens >= request.num_prompt_tokens
+
+    @staticmethod
+    def _request_is_prefill_phase(request: Request) -> bool:
+        return request.num_computed_tokens < request.num_prompt_tokens
+
+    def _has_waiting_decode_candidate(self) -> bool:
+        for request in self.waiting:
+            if self._request_is_decode_phase(request):
+                return True
+        return False
 
     def _enqueue_waiting_request(self, request: Request) -> None:
         if self._is_blocked_waiting_status(request.status):

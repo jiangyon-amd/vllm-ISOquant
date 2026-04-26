@@ -130,7 +130,14 @@ class SiluAndMul(CustomOp):
     def __init__(self, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
-            self.op = torch.ops._C.silu_and_mul
+            if self.enabled() and hasattr(torch.ops._C, "silu_and_mul"):
+                self.op = torch.ops._C.silu_and_mul
+            else:
+                logger.warning_once(
+                    "Falling back to native SiluAndMul because the compiled "
+                    "custom op is disabled or unavailable."
+                )
+                self._forward_method = self.forward_native
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
