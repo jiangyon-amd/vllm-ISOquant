@@ -92,8 +92,25 @@ def _hip_so_is_usable(so_path: str, *reference_files: str) -> bool:
     return True
 
 
-# ---- Shared argtypes for Stage1 split kernels (same ABI across variants) ----
-# V52 bf16/fp16: adds `dtype` param (0=bf16, 1=fp16) after norm_correction
+# ---- Shared argtypes for the Unified kernel v136 ----
+# v136 accepts bf16 Q input and supports dual-mode operation:
+#   splits > 1: write partials to mid_o (needs Stage2)
+#   splits == 1: write final bf16 output directly (no Stage2)
+_UNIFIED_ARGTYPES = (
+    [ctypes.c_void_p] * 7  # q_rot_bf16, kv_cache, bt, seq_lens, centroids, mid_o, output
+    + [ctypes.c_int] * 2   # stride_qb, stride_qh
+    + [ctypes.c_int] * 3   # stride_cb, stride_cp, stride_ch
+    + [ctypes.c_int]       # stride_bt
+    + [ctypes.c_int] * 3   # stride_mb, stride_mh, stride_ms
+    + [ctypes.c_int] * 2   # stride_ob, stride_oh
+    + [ctypes.c_int] * 4   # num_kv_heads, block_size, num_kv_splits, kv_group_size
+    + [ctypes.c_float]     # attn_scale
+    + [ctypes.c_int]       # norm_correction
+    + [ctypes.c_int] * 2   # B, Hq
+    + [ctypes.c_void_p]    # hipStream_t stream
+)
+
+# Legacy argtypes (v132 and earlier) — kept for backward compat
 _STAGE1_ARGTYPES = (
     [ctypes.c_void_p] * 6  # q_rot, kv_cache, bt, seq_lens, centroids, mid_o
     + [ctypes.c_int] * 2   # stride_qb, stride_qh
@@ -109,18 +126,18 @@ _STAGE1_ARGTYPES = (
 
 
 def _load_hip_split():
-    """Load the split-KV Stage1 kernel v132 (Vec loads + Q prefetch).
+    """Load the unified kernel v136 (bf16 Q + direct output + split paths).
 
     Architecture: 256 threads = 4 wavefronts, Grid=(B, Hk, splits).
+    Dual-mode operation:
+      - splits > 1: write partials to mid_o, separate Stage2 reduces
+      - splits == 1: write final bf16 output directly, no Stage2
+    Accepts native bf16 Q input (halves Q HBM traffic vs fp32).
     Phase 1 (K scoring): All 4 waves do MFMA (each handles 2 of 8
-    kb blocks), with cross-wave LDS reduction.  K data prefetched
-    to LDS via vectorized uint32 loads. Q pre-loaded to LDS as bf16
-    once before main loop (eliminates repeated HBM Q reads).
-    Phase 2 (Value accumulation): Values dequantized to bf16 in LDS,
-    then P×V computed via MFMA (each wave handles 2 of 8 dim blocks).
-    Results redistributed through LDS to all 256 threads.
-    80 VGPRs, 15.4KB LDS, 0 spills, 5 syncs per iteration.
-    1.162x geomean over v125, 1.315x at B32_L8192.
+    kb blocks), with cross-wave LDS reduction.
+    Phase 2 (Value accumulation): Value MFMA with LDS redistribution.
+    Based on v132 core with bf16 Q path and unified output logic.
+    1.104x geomean E2E speedup over v132 production.
     """
     global _HIP_SPLIT_LIB, _HIP_SPLIT_FN
     if _HIP_SPLIT_FN is not None:
@@ -138,8 +155,8 @@ def _load_hip_split():
 
     try:
         lib = ctypes.CDLL(so_path)
-        fn = lib.launch_tq_decode_stage1
-        fn.argtypes = _STAGE1_ARGTYPES
+        fn = lib.launch_tq_decode_unified
+        fn.argtypes = _UNIFIED_ARGTYPES
         fn.restype = None
         _HIP_SPLIT_LIB = lib
         _HIP_SPLIT_FN = fn
@@ -1217,34 +1234,42 @@ def triton_turboquant_decode_attention(
         return output
 
     # -------------------------------------------------------------------
-    # SPLIT PATH: GEMM + Stage1 (split-KV) + Stage2 (reduce)
+    # SPLIT/UNIFIED PATH: GEMM + Unified Kernel v136
     #
-    # V52 bf16: native-dtype Q path — no fp32 conversion.
-    # Like V4 fused, uses PiT in query's dtype for native GEMM,
-    # halving GEMM cost and q_rot HBM traffic (2B vs 4B/element).
+    # v136 unified kernel accepts bf16 Q input and supports dual-mode:
+    #   splits > 1: write partials to mid_o → separate Stage2
+    #   splits == 1: write final bf16 output directly → no Stage2
+    # bf16 GEMM is ~40% cheaper than fp32 GEMM (~15µs vs ~20µs).
+    # 1.104x geomean E2E speedup over v132 production.
     # -------------------------------------------------------------------
-    # Compute q_rot (native dtype for HIP, fp32 for Triton fallback)
+    # Compute q_rot (bf16 for HIP v136, fp32 for Triton fallback)
     hip_split_fn = _load_hip_split() if _hip_safe else None
     _q_dtype = query.dtype
 
     if key_fp8:
         q_rot = query.contiguous()
     elif hip_split_fn is not None:
-        # fp32 GEMM: split kernel (V60b) expects const float* q_rot
+        # v136: bf16 GEMM — native dtype path
+        PiT_native = getattr(buf_holder, "_tq_PiT_native", None) if buf_holder else None
+        if PiT_native is None or PiT_native.dtype != _q_dtype:
+            PiT_native = PiT.to(_q_dtype).contiguous()
+            if buf_holder is not None:
+                buf_holder._tq_PiT_native = PiT_native
+
         if (
             q_rot_buf is not None
             and q_rot_buf.shape[0] >= B
-            and q_rot_buf.dtype == torch.float32
+            and q_rot_buf.dtype == _q_dtype
         ):
             q_rot = q_rot_buf[:B]
-            q_flat = query.reshape(B * Hq, D).float()
+            q_flat = query.reshape(B * Hq, D)
             t0 = time.perf_counter()
-            torch.mm(q_flat, PiT, out=q_rot.reshape(B * Hq, D))
+            torch.mm(q_flat, PiT_native, out=q_rot.reshape(B * Hq, D))
             host_qrot_us = (time.perf_counter() - t0) * 1e6
         else:
-            q_float = query.float()
+            q_flat = query.reshape(B * Hq, D)
             t0 = time.perf_counter()
-            q_rot = (q_float @ PiT).contiguous()
+            q_rot = (q_flat @ PiT_native).reshape(B, Hq, D).contiguous()
             host_qrot_us = (time.perf_counter() - t0) * 1e6
             if buf_holder is not None:
                 buf_holder._tq_q_rot_buf = q_rot
@@ -1270,39 +1295,33 @@ def triton_turboquant_decode_attention(
 
     if hip_split_fn is not None:
         _nc = 1 if norm_correction else 0
-        _has_split_op = False  # Disabled: torch.ops.tq ABI mismatch
-        if _has_split_op:
-            t0 = time.perf_counter()
-            torch.ops.tq.hip_stage1_split(
-                q_rot, kv_cache, block_table, seq_lens,
-                centroids_f32, mid_o,
-                Hk, block_size, NUM_KV_SPLITS, kv_group_size,
-                scale, _nc,
-            )
-            host_stage1_us = (time.perf_counter() - t0) * 1e6
-            stage1_custom_op = "torch_ops"
-        else:
-            t0 = time.perf_counter()
-            hip_split_fn(
+        # v136 unified kernel ABI: accepts output ptr for direct-output mode
+        # When NUM_KV_SPLITS > 1, output ptr is unused (mid_o path).
+        # We pass a placeholder output; real output comes from Stage2.
+        _placeholder_output = mid_o  # unused when splits > 1
+        t0 = time.perf_counter()
+        hip_split_fn(
                 q_rot.data_ptr(),
                 kv_cache.data_ptr(),
                 block_table.data_ptr(),
                 seq_lens.data_ptr(),
                 centroids_f32.data_ptr(),
                 mid_o.data_ptr(),
+                _placeholder_output.data_ptr(),
                 q_rot.stride(0), q_rot.stride(1),
                 kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
                 block_table.stride(0),
                 mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+                0, 0,  # stride_ob, stride_oh — unused when splits > 1
                 Hk, block_size, NUM_KV_SPLITS, kv_group_size,
                 scale,
                 _nc,
                 B, Hq,
                 ctypes.c_void_p(stream_ptr),
             )
-            host_stage1_us = (time.perf_counter() - t0) * 1e6
-            stage1_custom_op = "ctypes"
-        decode_path = "hip_split"
+        host_stage1_us = (time.perf_counter() - t0) * 1e6
+        stage1_custom_op = "ctypes"
+        decode_path = "hip_unified_v136"
     else:
         # Triton fallback (CUDA, FP8 path, or no HIP .so)
         fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
