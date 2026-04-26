@@ -109,13 +109,16 @@ _STAGE1_ARGTYPES = (
 
 
 def _load_hip_split():
-    """Load the split-KV Stage1 kernel v116 (4-warp, 256 threads, MFMA GQA).
+    """Load the split-KV Stage1 kernel v123 (Value MFMA, 256 threads).
 
     Architecture: 256 threads = 4 wavefronts, Grid=(B, Hk, splits).
-    All 4 waves participate in MFMA (each handles 2 of 8 kb blocks),
-    with cross-wave LDS reduction.  Both K and V data are prefetched
-    to LDS before compute phases, eliminating all HBM reads during
-    MFMA and value accumulation.  3.3x geomean speedup over Triton.
+    Phase 1 (K scoring): All 4 waves do MFMA (each handles 2 of 8
+    kb blocks), with cross-wave LDS reduction.  K data prefetched
+    to LDS.
+    Phase 2 (Value accumulation): Values dequantized to bf16 in LDS,
+    then P×V computed via MFMA (each wave handles 2 of 8 dim blocks).
+    Results redistributed through LDS to all 256 threads.
+    ~2.0x geomean speedup over Triton, ~2.4x over Aditi (B>=8).
     """
     global _HIP_SPLIT_LIB, _HIP_SPLIT_FN
     if _HIP_SPLIT_FN is not None:
