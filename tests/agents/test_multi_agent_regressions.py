@@ -8,6 +8,7 @@ from agents.agent_campaign_evaluator import CampaignEvaluatorAgent
 from agents.agent_reviewer import ReviewerAgent
 from agents.orchestrator import Orchestrator
 from agents.state import ActionSpec, CandidateStatus, Phase, PipelineState, create_run
+from agents.target_registry import get_target
 
 
 def _make_candidate(
@@ -339,3 +340,39 @@ def test_shortlist_candidates_does_not_overwrite_processed_status(tmp_path):
     ]
     assert reviewed.status == CandidateStatus.REVIEWED.value
     assert benchmarked.status == CandidateStatus.BENCHMARKED.value
+
+
+def test_fusion_v136_mfma_candidate_is_registered():
+    target = get_target("tq_fusion_v3_hip")
+    candidates = target.search_space["fusion_config_change"]
+
+    assert any(
+        candidate["name"] == "hip_v3_v136_mfma"
+        and candidate["params"]["decode_impl"] == "hip_v3_v136_mfma"
+        for candidate in candidates
+    )
+
+
+def test_fusion_env_enables_v136_mfma_decode_impl(tmp_path, monkeypatch):
+    config_path = tmp_path / "campaign_config.json"
+    config_path.write_text(
+        json.dumps({"decode_impl": "hip_v3_v136_mfma"}),
+        encoding="utf-8",
+    )
+    state = create_run("tq_fusion_v3_hip", base_dir=str(tmp_path))
+    state.start_iteration()
+    candidate = _make_candidate(
+        state,
+        action_type="fusion_config_change",
+        name="hip_v3_v136_mfma",
+        generator="system",
+    )
+    candidate.artifacts["campaign_config"] = str(config_path)
+
+    monkeypatch.setenv("VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ", "1")
+    evaluator = CampaignEvaluatorAgent(python_exe="python")
+    env = evaluator._fusion_env(candidate, {"gpu": "0"})
+
+    assert env["VLLM_TQ_FUSION_V3_HIP"] == "1"
+    assert env["VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA"] == "1"
+    assert "VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ" not in env

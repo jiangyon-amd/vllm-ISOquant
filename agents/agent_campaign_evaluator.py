@@ -176,8 +176,17 @@ class CampaignEvaluatorAgent:
                     campaign_config = json.load(f)
             except Exception:
                 campaign_config = {}
+            for key in (
+                "VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ",
+                "VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA",
+                "VLLM_TQ_FUSION_V3_DECODE_HIP_MFMA_QK",
+                "VLLM_TQ_FUSION_V3_DECODE_HIP_SCALAR",
+            ):
+                env.pop(key, None)
             if campaign_config.get("decode_impl") == "hip_v3_flash_tq":
                 env["VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ"] = "1"
+            if campaign_config.get("decode_impl") == "hip_v3_v136_mfma":
+                env["VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA"] = "1"
             if campaign_config.get("decode_impl") == "hip_v3_mfma_qk":
                 env["VLLM_TQ_FUSION_V3_DECODE_HIP_MFMA_QK"] = "1"
             if campaign_config.get("decode_impl") == "hip_v3_scalar":

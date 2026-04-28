@@ -395,6 +395,27 @@ FUSION_CAMPAIGN_CONFIG = TargetConfig(
                 "expected_gain": 0.26,
             },
             {
+                "name": "hip_v3_v136_mfma",
+                "params": {"decode_impl": "hip_v3_v136_mfma"},
+                "expected_gain": 0.31,
+            },
+            {
+                "name": "hip_v3_v136_mfma_kv8",
+                "params": {
+                    "decode_impl": "hip_v3_v136_mfma",
+                    "max_num_kv_splits_cap": 8,
+                },
+                "expected_gain": 0.28,
+            },
+            {
+                "name": "hip_v3_v136_mfma_kv16",
+                "params": {
+                    "decode_impl": "hip_v3_v136_mfma",
+                    "max_num_kv_splits_cap": 16,
+                },
+                "expected_gain": 0.27,
+            },
+            {
                 "name": "pr_decode_threshold_128",
                 "params": {"short_decode_threshold": 128},
                 "expected_gain": 0.00,

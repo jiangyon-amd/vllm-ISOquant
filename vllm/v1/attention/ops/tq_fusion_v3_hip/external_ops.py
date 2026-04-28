@@ -231,6 +231,58 @@ def _load_hip_v3_flash_tq():
         return None
 
 
+@lru_cache
+def _load_hip_v3_v136_mfma_from_path(so_path: str):
+    try:
+        lib = ctypes.CDLL(so_path)
+        fn = lib.launch_tq_v3_v136_mfma_decode
+        fn.argtypes = (
+            [ctypes.c_void_p] * 7
+            + [ctypes.c_int] * 13
+            + [ctypes.c_float]
+            + [ctypes.c_int] * 3
+            + [ctypes.c_void_p]
+        )
+        fn.restype = None
+        return fn
+    except Exception as exc:
+        _warn_hip_v3_scalar_once(
+            "v136-mfma-load-failed",
+            f"Failed to load TurboQuant fusion v3 HIP v136-MFMA decode: {exc}; "
+            "falling back to FlashTQ/MFMA/scalar/Triton v3.",
+        )
+        return None
+
+
+def _load_hip_v3_v136_mfma():
+    if os.environ.get("VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA", "0") != "1":
+        return None
+    if os.environ.get("TQ_DISABLE_HIP_SO", "0") == "1":
+        _warn_hip_v3_scalar_once(
+            "v136-mfma-disabled",
+            "TurboQuant fusion v3 HIP v136-MFMA decode is disabled by "
+            "TQ_DISABLE_HIP_SO=1; falling back to FlashTQ/MFMA/scalar/Triton v3.",
+        )
+        return None
+    if not current_platform.is_rocm():
+        return None
+
+    so_path = Path(
+        os.environ.get(
+            "VLLM_TQ_FUSION_V3_HIP_V136_MFMA_SO_PATH",
+            str(Path(__file__).with_name("hip_v3_v136_mfma.so")),
+        )
+    )
+    if not so_path.exists():
+        _warn_hip_v3_scalar_once(
+            "v136-mfma-missing",
+            f"TurboQuant fusion v3 HIP v136-MFMA decode library is missing: "
+            f"{so_path}; falling back to FlashTQ/MFMA/scalar/Triton v3.",
+        )
+        return None
+    return _load_hip_v3_v136_mfma_from_path(str(so_path))
+
+
 def _dtype_code(dtype: torch.dtype) -> int | None:
     if dtype is torch.bfloat16:
         return 0
@@ -293,7 +345,13 @@ def _decode_num_splits(
     return min(num_splits, max_possible_splits)
 
 
-def _maybe_hip_v3_mfma_like_decode(fn, *args, **kwargs):
+def _maybe_hip_v3_mfma_like_decode(
+    fn,
+    *args,
+    q_rot_dtype: torch.dtype | None = None,
+    require_query_dtype: torch.dtype | None = None,
+    **kwargs,
+):
     if fn is None:
         return None
 
@@ -312,6 +370,8 @@ def _maybe_hip_v3_mfma_like_decode(fn, *args, **kwargs):
     max_seq_len = int(kwargs.get("max_seq_len", 0) or 0)
     max_num_kv_splits = int(kwargs.get("max_num_kv_splits", 32))
 
+    if require_query_dtype is not None and query.dtype != require_query_dtype:
+        return None
     if not _hip_v3_scalar_safe(
         query, kv_cache, block_table, seq_lens, centroids, mse_bits,
         value_quant_bits, key_fp8,
@@ -326,6 +386,9 @@ def _maybe_hip_v3_mfma_like_decode(fn, *args, **kwargs):
         return None
 
     q_rot = _rotated_query_fp32(query, Pi, PiT)
+    if q_rot_dtype is not None:
+        q_rot = q_rot.to(q_rot_dtype)
+    q_rot = q_rot.contiguous()
     output = output_buf[:B] if output_buf is not None else torch.empty_like(query)
     if not output.is_contiguous():
         output = output.contiguous()
@@ -371,6 +434,16 @@ def _maybe_hip_v3_mfma_like_decode(fn, *args, **kwargs):
         ctypes.c_void_p(stream_ptr),
     )
     return output
+
+
+def _maybe_hip_v3_v136_mfma_decode(*args, **kwargs):
+    return _maybe_hip_v3_mfma_like_decode(
+        _load_hip_v3_v136_mfma(),
+        *args,
+        q_rot_dtype=torch.bfloat16,
+        require_query_dtype=torch.bfloat16,
+        **kwargs,
+    )
 
 
 def _maybe_hip_v3_flash_tq_decode(*args, **kwargs):
@@ -482,6 +555,9 @@ def triton_turboquant_unified_attention(*args, **kwargs):
 
 
 def triton_turboquant_decode_attention_v3(*args, **kwargs):
+    hip_out = _maybe_hip_v3_v136_mfma_decode(*args, **kwargs)
+    if hip_out is not None:
+        return hip_out
     hip_out = _maybe_hip_v3_flash_tq_decode(*args, **kwargs)
     if hip_out is not None:
         return hip_out
