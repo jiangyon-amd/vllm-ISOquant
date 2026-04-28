@@ -28,7 +28,8 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_decode_attention import _fwd_kernel_stage2
-from vllm.v1.attention.ops.triton_turboquant_decode import _use_fp8_e4b15
+
+from .triton_turboquant_decode import _use_fp8_e4b15
 
 # ROCm prefers num_stages=1 in attention-like kernels to reduce shared-memory
 # pressure (mirrors the pattern used in triton_decode_attention.py and

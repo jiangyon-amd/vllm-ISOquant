@@ -15,7 +15,8 @@ import math
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_turboquant_decode import _use_fp8_e4b15
+
+from .triton_turboquant_decode import _use_fp8_e4b15
 
 # ═══════════════════════════════════════════════════════════════════════
 # Shared: value uniform quantization + pack + SoA scale/zero store
