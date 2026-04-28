@@ -167,33 +167,33 @@ class CampaignEvaluatorAgent:
             self.repo_root if not pythonpath else f"{self.repo_root}:{pythonpath}"
         )
         env["TQ_ALLOW_STALE_HIP_SO"] = env.get("TQ_ALLOW_STALE_HIP_SO", "1")
-        env["VLLM_TQ_FUSION_V3_HIP"] = "1"
+        env["VLLM_TQ_SOA_FUSION"] = "1"
         config_path = candidate.artifacts.get("campaign_config", "")
         if config_path:
-            env["VLLM_TQ_FUSION_CAMPAIGN_CONFIG"] = config_path
+            env["VLLM_TQ_SOA_FUSION_CAMPAIGN_CONFIG"] = config_path
             try:
                 with open(config_path) as f:
                     campaign_config = json.load(f)
             except Exception:
                 campaign_config = {}
             for key in (
-                "VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ",
-                "VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA",
-                "VLLM_TQ_FUSION_V3_DECODE_HIP_MFMA_QK",
-                "VLLM_TQ_FUSION_V3_DECODE_HIP_SCALAR",
+                "VLLM_TQ_SOA_FUSION_DECODE_FLASH_TQ",
+                "VLLM_TQ_SOA_FUSION_DECODE_BF16Q_PV_MFMA",
+                "VLLM_TQ_SOA_FUSION_DECODE_MFMA_QK",
+                "VLLM_TQ_SOA_FUSION_DECODE_SCALAR",
             ):
                 env.pop(key, None)
             if campaign_config.get("decode_impl") == "hip_v3_flash_tq":
-                env["VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ"] = "1"
-            if campaign_config.get("decode_impl") == "hip_v3_v136_mfma":
-                env["VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA"] = "1"
+                env["VLLM_TQ_SOA_FUSION_DECODE_FLASH_TQ"] = "1"
+            if campaign_config.get("decode_impl") == "soa_bf16q_pv_mfma":
+                env["VLLM_TQ_SOA_FUSION_DECODE_BF16Q_PV_MFMA"] = "1"
             if campaign_config.get("decode_impl") == "hip_v3_mfma_qk":
-                env["VLLM_TQ_FUSION_V3_DECODE_HIP_MFMA_QK"] = "1"
+                env["VLLM_TQ_SOA_FUSION_DECODE_MFMA_QK"] = "1"
             if campaign_config.get("decode_impl") == "hip_v3_scalar":
-                env["VLLM_TQ_FUSION_V3_DECODE_HIP_SCALAR"] = "1"
+                env["VLLM_TQ_SOA_FUSION_DECODE_SCALAR"] = "1"
         external_source_root = candidate.artifacts.get("external_source_root", "")
         if external_source_root:
-            env["VLLM_TQ_FUSION_V3_HIP_SOURCE_ROOT"] = external_source_root
+            env["VLLM_TQ_SOA_FUSION_SOURCE_ROOT"] = external_source_root
         return env
 
     def _server_compilation_config_args(self, cfg: dict[str, Any]) -> list[str]:
@@ -232,7 +232,7 @@ class CampaignEvaluatorAgent:
             from vllm.model_executor.layers.quantization.turboquant.centroids import (
                 solve_lloyd_max,
             )
-            from vllm.v1.attention.ops.tq_fusion_v3_hip.external_ops import (
+            from vllm.v1.attention.ops.turboquant_soa_fusion.external_ops import (
                 _tq_full_dequant_kv,
                 _use_fp8_e4b15,
                 triton_turboquant_store,

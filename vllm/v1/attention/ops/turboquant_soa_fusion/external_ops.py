@@ -1,4 +1,4 @@
-"""Bridge to the v3 SoA/unified TurboQuant kernels.
+"""Bridge to the SoA/unified TurboQuant kernels.
 
 The local experimental path lives in this repository, but for the first
 bring-up we keep the Python/Triton source of truth in the sibling
@@ -37,7 +37,7 @@ def _warn_hip_v3_scalar_once(key: str, message: str) -> None:
 
 
 def _source_root() -> Path:
-    override = os.environ.get("VLLM_TQ_FUSION_V3_HIP_SOURCE_ROOT")
+    override = os.environ.get("VLLM_TQ_SOA_FUSION_SOURCE_ROOT")
     return Path(override) if override else _DEFAULT_SOURCE_ROOT
 
 
@@ -45,9 +45,9 @@ def _load_module(module_name: str, file_name: str) -> ModuleType:
     source_path = _source_root() / file_name
     if not source_path.exists():
         raise ImportError(
-            "TurboQuant fusion v3 source file is missing: "
-            f"{source_path}. Set VLLM_TQ_FUSION_V3_HIP_SOURCE_ROOT to a checkout "
-            "that contains the upstream v3 SoA/unified kernels."
+            "TurboQuant SoA fusion source file is missing: "
+            f"{source_path}. Set VLLM_TQ_SOA_FUSION_SOURCE_ROOT to a checkout "
+            "that contains the upstream SoA/unified kernels."
         )
 
     spec = importlib.util.spec_from_file_location(module_name, source_path)
@@ -63,7 +63,7 @@ def _load_module(module_name: str, file_name: str) -> ModuleType:
 @lru_cache
 def _decode_module() -> ModuleType:
     return _load_module(
-        "vllm.v1.attention.ops.tq_fusion_v3_hip._external_decode",
+        "vllm.v1.attention.ops.turboquant_soa_fusion._external_decode",
         "triton_turboquant_decode.py",
     )
 
@@ -71,7 +71,7 @@ def _decode_module() -> ModuleType:
 @lru_cache
 def _store_module() -> ModuleType:
     return _load_module(
-        "vllm.v1.attention.ops.tq_fusion_v3_hip._external_store",
+        "vllm.v1.attention.ops.turboquant_soa_fusion._external_store",
         "triton_turboquant_store.py",
     )
 
@@ -79,19 +79,19 @@ def _store_module() -> ModuleType:
 @lru_cache
 def _unified_module() -> ModuleType:
     return _load_module(
-        "vllm.v1.attention.ops.tq_fusion_v3_hip._external_unified_attention",
+        "vllm.v1.attention.ops.turboquant_soa_fusion._external_unified_attention",
         "triton_turboquant_unified_attention.py",
     )
 
 
 @lru_cache
 def _load_hip_v3_scalar():
-    if os.environ.get("VLLM_TQ_FUSION_V3_DECODE_HIP_SCALAR", "0") != "1":
+    if os.environ.get("VLLM_TQ_SOA_FUSION_DECODE_SCALAR", "0") != "1":
         return None
     if os.environ.get("TQ_DISABLE_HIP_SO", "0") == "1":
         _warn_hip_v3_scalar_once(
             "disabled",
-            "TurboQuant fusion v3 HIP scalar decode is disabled by "
+            "TurboQuant SoA HIP scalar decode is disabled by "
             "TQ_DISABLE_HIP_SO=1; falling back to Triton v3.",
         )
         return None
@@ -100,14 +100,14 @@ def _load_hip_v3_scalar():
 
     so_path = Path(
         os.environ.get(
-            "VLLM_TQ_FUSION_V3_HIP_SCALAR_SO_PATH",
+            "VLLM_TQ_SOA_FUSION_SCALAR_SO_PATH",
             str(Path(__file__).with_name("hip_v3_scalar.so")),
         )
     )
     if not so_path.exists():
         _warn_hip_v3_scalar_once(
             "missing",
-            f"TurboQuant fusion v3 HIP scalar decode library is missing: {so_path}; "
+            f"TurboQuant SoA HIP scalar decode library is missing: {so_path}; "
             "falling back to Triton v3.",
         )
         return None
@@ -127,7 +127,7 @@ def _load_hip_v3_scalar():
     except Exception as exc:
         _warn_hip_v3_scalar_once(
             "load-failed",
-            f"Failed to load TurboQuant fusion v3 HIP scalar decode: {exc}; "
+            f"Failed to load TurboQuant SoA HIP scalar decode: {exc}; "
             "falling back to Triton v3.",
         )
         return None
@@ -135,12 +135,12 @@ def _load_hip_v3_scalar():
 
 @lru_cache
 def _load_hip_v3_mfma_qk():
-    if os.environ.get("VLLM_TQ_FUSION_V3_DECODE_HIP_MFMA_QK", "0") != "1":
+    if os.environ.get("VLLM_TQ_SOA_FUSION_DECODE_MFMA_QK", "0") != "1":
         return None
     if os.environ.get("TQ_DISABLE_HIP_SO", "0") == "1":
         _warn_hip_v3_scalar_once(
             "mfma-disabled",
-            "TurboQuant fusion v3 HIP MFMA-QK decode is disabled by "
+            "TurboQuant SoA HIP MFMA-QK decode is disabled by "
             "TQ_DISABLE_HIP_SO=1; falling back to scalar/Triton v3.",
         )
         return None
@@ -149,14 +149,14 @@ def _load_hip_v3_mfma_qk():
 
     so_path = Path(
         os.environ.get(
-            "VLLM_TQ_FUSION_V3_HIP_MFMA_QK_SO_PATH",
+            "VLLM_TQ_SOA_FUSION_MFMA_QK_SO_PATH",
             str(Path(__file__).with_name("hip_v3_mfma_qk.so")),
         )
     )
     if not so_path.exists():
         _warn_hip_v3_scalar_once(
             "mfma-missing",
-            f"TurboQuant fusion v3 HIP MFMA-QK decode library is missing: {so_path}; "
+            f"TurboQuant SoA HIP MFMA-QK decode library is missing: {so_path}; "
             "falling back to scalar/Triton v3.",
         )
         return None
@@ -176,7 +176,7 @@ def _load_hip_v3_mfma_qk():
     except Exception as exc:
         _warn_hip_v3_scalar_once(
             "mfma-load-failed",
-            f"Failed to load TurboQuant fusion v3 HIP MFMA-QK decode: {exc}; "
+            f"Failed to load TurboQuant SoA HIP MFMA-QK decode: {exc}; "
             "falling back to scalar/Triton v3.",
         )
         return None
@@ -184,12 +184,12 @@ def _load_hip_v3_mfma_qk():
 
 @lru_cache
 def _load_hip_v3_flash_tq():
-    if os.environ.get("VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ", "0") != "1":
+    if os.environ.get("VLLM_TQ_SOA_FUSION_DECODE_FLASH_TQ", "0") != "1":
         return None
     if os.environ.get("TQ_DISABLE_HIP_SO", "0") == "1":
         _warn_hip_v3_scalar_once(
             "flash-tq-disabled",
-            "TurboQuant fusion v3 HIP FlashTQ decode is disabled by "
+            "TurboQuant SoA HIP FlashTQ decode is disabled by "
             "TQ_DISABLE_HIP_SO=1; falling back to MFMA/scalar/Triton v3.",
         )
         return None
@@ -198,14 +198,14 @@ def _load_hip_v3_flash_tq():
 
     so_path = Path(
         os.environ.get(
-            "VLLM_TQ_FUSION_V3_HIP_FLASH_TQ_SO_PATH",
+            "VLLM_TQ_SOA_FUSION_FLASH_TQ_SO_PATH",
             str(Path(__file__).with_name("hip_v3_flash_tq.so")),
         )
     )
     if not so_path.exists():
         _warn_hip_v3_scalar_once(
             "flash-tq-missing",
-            f"TurboQuant fusion v3 HIP FlashTQ decode library is missing: {so_path}; "
+            f"TurboQuant SoA HIP FlashTQ decode library is missing: {so_path}; "
             "falling back to MFMA/scalar/Triton v3.",
         )
         return None
@@ -225,17 +225,17 @@ def _load_hip_v3_flash_tq():
     except Exception as exc:
         _warn_hip_v3_scalar_once(
             "flash-tq-load-failed",
-            f"Failed to load TurboQuant fusion v3 HIP FlashTQ decode: {exc}; "
+            f"Failed to load TurboQuant SoA HIP FlashTQ decode: {exc}; "
             "falling back to MFMA/scalar/Triton v3.",
         )
         return None
 
 
 @lru_cache
-def _load_hip_v3_v136_mfma_from_path(so_path: str):
+def _load_soa_bf16q_pv_mfma_from_path(so_path: str):
     try:
         lib = ctypes.CDLL(so_path)
-        fn = lib.launch_tq_v3_v136_mfma_decode
+        fn = lib.launch_tq_soa_bf16q_pv_mfma_decode
         fn.argtypes = (
             [ctypes.c_void_p] * 7
             + [ctypes.c_int] * 13
@@ -247,20 +247,20 @@ def _load_hip_v3_v136_mfma_from_path(so_path: str):
         return fn
     except Exception as exc:
         _warn_hip_v3_scalar_once(
-            "v136-mfma-load-failed",
-            f"Failed to load TurboQuant fusion v3 HIP v136-MFMA decode: {exc}; "
+            "bf16q-pv-mfma-load-failed",
+            f"Failed to load TurboQuant SoA bf16Q/PV-MFMA decode: {exc}; "
             "falling back to FlashTQ/MFMA/scalar/Triton v3.",
         )
         return None
 
 
-def _load_hip_v3_v136_mfma():
-    if os.environ.get("VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA", "0") != "1":
+def _load_soa_bf16q_pv_mfma():
+    if os.environ.get("VLLM_TQ_SOA_FUSION_DECODE_BF16Q_PV_MFMA", "0") != "1":
         return None
     if os.environ.get("TQ_DISABLE_HIP_SO", "0") == "1":
         _warn_hip_v3_scalar_once(
-            "v136-mfma-disabled",
-            "TurboQuant fusion v3 HIP v136-MFMA decode is disabled by "
+            "bf16q-pv-mfma-disabled",
+            "TurboQuant SoA bf16Q/PV-MFMA decode is disabled by "
             "TQ_DISABLE_HIP_SO=1; falling back to FlashTQ/MFMA/scalar/Triton v3.",
         )
         return None
@@ -269,18 +269,18 @@ def _load_hip_v3_v136_mfma():
 
     so_path = Path(
         os.environ.get(
-            "VLLM_TQ_FUSION_V3_HIP_V136_MFMA_SO_PATH",
-            str(Path(__file__).with_name("hip_v3_v136_mfma.so")),
+            "VLLM_TQ_SOA_FUSION_BF16Q_PV_MFMA_SO_PATH",
+            str(Path(__file__).with_name("soa_bf16q_pv_mfma_decode.so")),
         )
     )
     if not so_path.exists():
         _warn_hip_v3_scalar_once(
-            "v136-mfma-missing",
-            f"TurboQuant fusion v3 HIP v136-MFMA decode library is missing: "
+            "bf16q-pv-mfma-missing",
+            f"TurboQuant SoA bf16Q/PV-MFMA decode library is missing: "
             f"{so_path}; falling back to FlashTQ/MFMA/scalar/Triton v3.",
         )
         return None
-    return _load_hip_v3_v136_mfma_from_path(str(so_path))
+    return _load_soa_bf16q_pv_mfma_from_path(str(so_path))
 
 
 def _dtype_code(dtype: torch.dtype) -> int | None:
@@ -436,9 +436,9 @@ def _maybe_hip_v3_mfma_like_decode(
     return output
 
 
-def _maybe_hip_v3_v136_mfma_decode(*args, **kwargs):
+def _maybe_soa_bf16q_pv_mfma_decode(*args, **kwargs):
     return _maybe_hip_v3_mfma_like_decode(
-        _load_hip_v3_v136_mfma(),
+        _load_soa_bf16q_pv_mfma(),
         *args,
         q_rot_dtype=torch.bfloat16,
         require_query_dtype=torch.bfloat16,
@@ -555,7 +555,7 @@ def triton_turboquant_unified_attention(*args, **kwargs):
 
 
 def triton_turboquant_decode_attention_v3(*args, **kwargs):
-    hip_out = _maybe_hip_v3_v136_mfma_decode(*args, **kwargs)
+    hip_out = _maybe_soa_bf16q_pv_mfma_decode(*args, **kwargs)
     if hip_out is not None:
         return hip_out
     hip_out = _maybe_hip_v3_flash_tq_decode(*args, **kwargs)

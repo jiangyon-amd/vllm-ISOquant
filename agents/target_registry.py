@@ -44,7 +44,7 @@ class TargetConfig:
 _REPO = os.path.dirname(os.path.dirname(__file__))
 _KERNEL_DIR = os.path.join(_REPO, "geak_tq_decode", "hip_kernel")
 _OPS_DIR = os.path.join(_REPO, "vllm", "v1", "attention", "ops")
-_FUSION_DIR = os.path.join(_OPS_DIR, "tq_fusion_v3_hip")
+_FUSION_DIR = os.path.join(_OPS_DIR, "turboquant_soa_fusion")
 _QWEN_72B = "/shareddata/amd/jiangyon/models/Qwen2.5-72B-Instruct"
 
 
@@ -162,7 +162,7 @@ FUSED_CONFIG = TargetConfig(
 )
 
 FUSION_CAMPAIGN_CONFIG = TargetConfig(
-    name="tq_fusion_v3_hip",
+    name="turboquant_soa_fusion",
     kernel_dir=_FUSION_DIR,
     source_glob="*.py",
     launcher_name="",
@@ -395,22 +395,22 @@ FUSION_CAMPAIGN_CONFIG = TargetConfig(
                 "expected_gain": 0.26,
             },
             {
-                "name": "hip_v3_v136_mfma",
-                "params": {"decode_impl": "hip_v3_v136_mfma"},
+                "name": "soa_bf16q_pv_mfma",
+                "params": {"decode_impl": "soa_bf16q_pv_mfma"},
                 "expected_gain": 0.31,
             },
             {
-                "name": "hip_v3_v136_mfma_kv8",
+                "name": "soa_bf16q_pv_mfma_kv8",
                 "params": {
-                    "decode_impl": "hip_v3_v136_mfma",
+                    "decode_impl": "soa_bf16q_pv_mfma",
                     "max_num_kv_splits_cap": 8,
                 },
                 "expected_gain": 0.28,
             },
             {
-                "name": "hip_v3_v136_mfma_kv16",
+                "name": "soa_bf16q_pv_mfma_kv16",
                 "params": {
-                    "decode_impl": "hip_v3_v136_mfma",
+                    "decode_impl": "soa_bf16q_pv_mfma",
                     "max_num_kv_splits_cap": 16,
                 },
                 "expected_gain": 0.27,
@@ -705,7 +705,7 @@ REGISTRY: dict[str, TargetConfig] = {
     "tq_decode_fused":  FUSED_CONFIG,
     "tq_wht_rotate":    WHT_ROTATE_CONFIG,
     "tq_decode_fused_wht": FUSED_WHT_CONFIG,
-    "tq_fusion_v3_hip": FUSION_CAMPAIGN_CONFIG,
+    "turboquant_soa_fusion": FUSION_CAMPAIGN_CONFIG,
 }
 
 

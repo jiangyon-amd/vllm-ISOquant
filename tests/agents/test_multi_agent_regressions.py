@@ -29,7 +29,7 @@ def _make_candidate(
 
 
 def test_e2e_all_heavy_fail_does_not_promote_failed_candidate(tmp_path, monkeypatch):
-    state = create_run("tq_fusion_v3_hip", base_dir=str(tmp_path))
+    state = create_run("turboquant_soa_fusion", base_dir=str(tmp_path))
     state.start_iteration()
     state.phase = Phase.E2E_EVALUATE
 
@@ -117,7 +117,7 @@ def test_benchmark_resume_skips_already_processed_candidates(tmp_path, monkeypat
 
 
 def test_quick_gate_executes_decode_smoke_when_configured(tmp_path, monkeypatch):
-    state = create_run("tq_fusion_v3_hip", base_dir=str(tmp_path))
+    state = create_run("turboquant_soa_fusion", base_dir=str(tmp_path))
     state.start_iteration()
     candidate = _make_candidate(
         state,
@@ -158,7 +158,7 @@ def test_campaign_correctness_sets_status_when_quality_gate_only_returns_metrics
     tmp_path,
     monkeypatch,
 ):
-    state = create_run("tq_fusion_v3_hip", base_dir=str(tmp_path))
+    state = create_run("turboquant_soa_fusion", base_dir=str(tmp_path))
     state.start_iteration()
     state.phase = Phase.CORRECTNESS
     candidate = _make_candidate(
@@ -289,7 +289,7 @@ def test_state_load_ignores_removed_legacy_fields(tmp_path):
 
 
 def test_reviewer_run_keeps_state_current_object(tmp_path):
-    state = create_run("tq_fusion_v3_hip", base_dir=str(tmp_path))
+    state = create_run("turboquant_soa_fusion", base_dir=str(tmp_path))
     state.start_iteration()
     candidate = _make_candidate(
         state,
@@ -342,37 +342,37 @@ def test_shortlist_candidates_does_not_overwrite_processed_status(tmp_path):
     assert benchmarked.status == CandidateStatus.BENCHMARKED.value
 
 
-def test_fusion_v136_mfma_candidate_is_registered():
-    target = get_target("tq_fusion_v3_hip")
+def test_soa_bf16q_pv_mfma_candidate_is_registered():
+    target = get_target("turboquant_soa_fusion")
     candidates = target.search_space["fusion_config_change"]
 
     assert any(
-        candidate["name"] == "hip_v3_v136_mfma"
-        and candidate["params"]["decode_impl"] == "hip_v3_v136_mfma"
+        candidate["name"] == "soa_bf16q_pv_mfma"
+        and candidate["params"]["decode_impl"] == "soa_bf16q_pv_mfma"
         for candidate in candidates
     )
 
 
-def test_fusion_env_enables_v136_mfma_decode_impl(tmp_path, monkeypatch):
+def test_fusion_env_enables_soa_bf16q_pv_mfma_decode_impl(tmp_path, monkeypatch):
     config_path = tmp_path / "campaign_config.json"
     config_path.write_text(
-        json.dumps({"decode_impl": "hip_v3_v136_mfma"}),
+        json.dumps({"decode_impl": "soa_bf16q_pv_mfma"}),
         encoding="utf-8",
     )
-    state = create_run("tq_fusion_v3_hip", base_dir=str(tmp_path))
+    state = create_run("turboquant_soa_fusion", base_dir=str(tmp_path))
     state.start_iteration()
     candidate = _make_candidate(
         state,
         action_type="fusion_config_change",
-        name="hip_v3_v136_mfma",
+        name="soa_bf16q_pv_mfma",
         generator="system",
     )
     candidate.artifacts["campaign_config"] = str(config_path)
 
-    monkeypatch.setenv("VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ", "1")
+    monkeypatch.setenv("VLLM_TQ_SOA_FUSION_DECODE_FLASH_TQ", "1")
     evaluator = CampaignEvaluatorAgent(python_exe="python")
     env = evaluator._fusion_env(candidate, {"gpu": "0"})
 
-    assert env["VLLM_TQ_FUSION_V3_HIP"] == "1"
-    assert env["VLLM_TQ_FUSION_V3_DECODE_HIP_V136_MFMA"] == "1"
-    assert "VLLM_TQ_FUSION_V3_DECODE_HIP_FLASH_TQ" not in env
+    assert env["VLLM_TQ_SOA_FUSION"] == "1"
+    assert env["VLLM_TQ_SOA_FUSION_DECODE_BF16Q_PV_MFMA"] == "1"
+    assert "VLLM_TQ_SOA_FUSION_DECODE_FLASH_TQ" not in env

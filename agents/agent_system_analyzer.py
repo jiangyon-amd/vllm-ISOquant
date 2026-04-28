@@ -578,8 +578,8 @@ class SystemAnalyzerAgent:
                     ActionSpec(
                         action_id=f"system-{state.round_index}-campaign-switch",
                         action_type="campaign_switch",
-                        name="switch_to_tq_fusion_v3_hip",
-                        params={"target_kernel": "tq_fusion_v3_hip"},
+                        name="switch_to_turboquant_soa_fusion",
+                        params={"target_kernel": "turboquant_soa_fusion"},
                         rationale=(
                             "System analysis detected that layout / work-distribution "
                             "changes dominate micro-kernel tuning."

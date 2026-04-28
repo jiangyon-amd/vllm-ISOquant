@@ -263,7 +263,7 @@ class GEAKOptimizerAgent:
         params = candidate.action_spec.params
         source_root = Path(
             os.environ.get(
-                "VLLM_TQ_FUSION_V3_HIP_SOURCE_ROOT",
+                "VLLM_TQ_SOA_FUSION_SOURCE_ROOT",
                 "/shareddata/amd/jiangyon/vllm_tq_rocm_v3_sinks/vllm/v1/attention/ops",
             )
         )

@@ -3,7 +3,7 @@
 """Experimental full-stack TurboQuant fusion implementation.
 
 This implementation keeps the local metadata builder / scheduling glue, but
-swaps the core TurboQuant contract to the v3-style SoA store + unified
+swaps the core TurboQuant contract to the SoA store + unified
 attention path. The experimental switch is opt-in and does not perturb the
 existing production backend.
 """
@@ -54,7 +54,7 @@ def _load_campaign_config(config_path: str) -> dict[str, Any]:
 
 
 def _campaign_config() -> dict[str, Any]:
-    return _load_campaign_config(os.environ.get("VLLM_TQ_FUSION_CAMPAIGN_CONFIG", ""))
+    return _load_campaign_config(os.environ.get("VLLM_TQ_SOA_FUSION_CAMPAIGN_CONFIG", ""))
 
 
 def _campaign_option(name: str, default: Any) -> Any:
@@ -86,7 +86,7 @@ def _build_hadamard_cached(d: int, device_str: str) -> torch.Tensor:
 
 
 class FusionTurboQuantAttentionImpl(LegacyTurboQuantAttentionImpl):
-    """Local backend wrapper over the v3 SoA/unified TurboQuant contract."""
+    """Local backend wrapper over the SoA/unified TurboQuant contract."""
 
     def _ensure_on_device(self, layer, device):
         """Materialize v3-compatible cached tensors on the target device."""
@@ -307,7 +307,7 @@ class FusionTurboQuantAttentionImpl(LegacyTurboQuantAttentionImpl):
     ) -> torch.Tensor:
         """Continuation chunk path with SoA full-dequant and rotated reuse.
 
-        The cached keys are already stored in rotated space by the v3 SoA store.
+        The cached keys are already stored in rotated space by the SoA store.
         For MSE-key paths, we keep the local optimization that rotates the small
         continuation chunk into the same space instead of inverse-rotating the
         full cached history.

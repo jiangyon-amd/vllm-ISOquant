@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// v136-style bf16 Q decode for TurboQuant fusion v3 SoA layout.
+// TurboQuant SoA decode with bf16 Q input and QK/PV MFMA.
 //
-// This candidate keeps the validated v3 SoA cache contract from FlashTQ while
-// borrowing v137's native bf16 q_rot, bf16 QK/PV MFMA contract, and low-VGPR
-// softmax staging while keeping the validated v3 SoA cache addressing.
+// This candidate keeps the validated SoA cache addressing while using a
+// consistent MFMA lane contract for QK scores and PV accumulation.
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -33,7 +32,7 @@
 typedef short bf16x4_t __attribute__((ext_vector_type(4)));
 typedef float float4_t __attribute__((ext_vector_type(4)));
 
-__device__ __forceinline__ long long tq_v3_data_base_v136_mfma(
+__device__ __forceinline__ long long tq_soa_data_base(
     int block_num,
     int page_off,
     int kv_head,
@@ -45,7 +44,7 @@ __device__ __forceinline__ long long tq_v3_data_base_v136_mfma(
         + (long long)kv_head * DATA_BYTES_PER_SLOT;
 }
 
-__device__ __forceinline__ int tq_v3_meta_u16_addr_v136_mfma(
+__device__ __forceinline__ int tq_soa_meta_u16_addr(
     int block_num,
     int page_off,
     int kv_head,
@@ -75,7 +74,7 @@ __device__ __forceinline__ float bf16_to_float(short v) {
     return r.f;
 }
 
-__device__ __forceinline__ void store_native_4_v136_mfma(
+__device__ __forceinline__ void store_native_4_soa_fusion(
     void* out, int base, float v0, float v1, float v2, float v3, int dtype
 ) {
     if (dtype == DTYPE_BF16) {
@@ -94,7 +93,7 @@ __device__ __forceinline__ void store_native_4_v136_mfma(
 }
 
 extern "C" __global__ __launch_bounds__(THREADS, 2)
-void tq_v3_v136_mfma_stage1(
+void tq_soa_bf16q_pv_mfma_stage1(
     const short* __restrict__ q_rot_bf16,
     const unsigned char* __restrict__ kv_cache,
     const int* __restrict__ block_table,
@@ -182,17 +181,17 @@ void tq_v3_v136_mfma_stage1(
                 const int page_idx = kv_pos / block_size;
                 const int page_off = kv_pos & (block_size - 1);
                 const int block_num = block_table[bt_base + page_idx];
-                const long long db = tq_v3_data_base_v136_mfma(
+                const long long db = tq_soa_data_base(
                     block_num, page_off, kv_hid, stride_cache_block, num_kv_heads);
                 s_data_base[tid] = db;
 
-                const int kn_addr = tq_v3_meta_u16_addr_v136_mfma(
+                const int kn_addr = tq_soa_meta_u16_addr(
                     block_num, page_off, kv_hid, stride_cache_block, block_size,
                     num_kv_heads, SOA_K_NORM);
-                const int vs_addr = tq_v3_meta_u16_addr_v136_mfma(
+                const int vs_addr = tq_soa_meta_u16_addr(
                     block_num, page_off, kv_hid, stride_cache_block, block_size,
                     num_kv_heads, SOA_V_SCALE);
-                const int vz_addr = tq_v3_meta_u16_addr_v136_mfma(
+                const int vz_addr = tq_soa_meta_u16_addr(
                     block_num, page_off, kv_hid, stride_cache_block, block_size,
                     num_kv_heads, SOA_V_ZERO);
 
@@ -405,7 +404,7 @@ void tq_v3_v136_mfma_stage1(
 }
 
 extern "C" __global__ __launch_bounds__(THREADS, 8)
-void tq_v3_v136_mfma_stage2(
+void tq_soa_bf16q_pv_mfma_stage2(
     const float* __restrict__ mid_o,
     void* __restrict__ output,
     const int* __restrict__ seq_lens,
@@ -455,7 +454,7 @@ void tq_v3_v136_mfma_stage2(
     }
 }
 
-extern "C" void launch_tq_v3_v136_mfma_decode(
+extern "C" void launch_tq_soa_bf16q_pv_mfma_decode(
     const short* q_rot_bf16,
     const unsigned char* kv_cache,
     const int* block_table,
@@ -485,7 +484,7 @@ extern "C" void launch_tq_v3_v136_mfma_decode(
     dim3 grid1(B, num_kv_heads, num_kv_splits);
     dim3 block1(THREADS, 1, 1);
     hipLaunchKernelGGL(
-        tq_v3_v136_mfma_stage1, grid1, block1, 0, stream,
+        tq_soa_bf16q_pv_mfma_stage1, grid1, block1, 0, stream,
         q_rot_bf16, kv_cache, block_table, seq_lens, centroids, mid_o,
         stride_qb, stride_qh, stride_cache_block, stride_bt, stride_mb,
         stride_mh, stride_ms, num_kv_heads, block_size, num_kv_splits,
@@ -494,7 +493,7 @@ extern "C" void launch_tq_v3_v136_mfma_decode(
     dim3 grid2(B, Hq);
     dim3 block2(THREADS, 1, 1);
     hipLaunchKernelGGL(
-        tq_v3_v136_mfma_stage2, grid2, block2, 0, stream,
+        tq_soa_bf16q_pv_mfma_stage2, grid2, block2, 0, stream,
         mid_o, output, seq_lens, stride_mb, stride_mh, stride_ms, stride_ob,
         stride_oh, num_kv_splits, out_dtype);
 }

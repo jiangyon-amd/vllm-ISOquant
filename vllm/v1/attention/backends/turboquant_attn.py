@@ -45,7 +45,7 @@ _USE_STREAM_OVERLAP = os.environ.get("TQ_STREAM_OVERLAP", "0") == "1"
 
 # Experimental full-stack fusion path. This keeps the current production path
 # untouched and only switches the implementation class when the env flag is set.
-_USE_TQ_FUSION_V3_HIP = os.environ.get("VLLM_TQ_FUSION_V3_HIP", "0") == "1"
+_USE_TQ_SOA_FUSION = os.environ.get("VLLM_TQ_SOA_FUSION", "0") == "1"
 
 # Per-step batch mode flag: set by TurboQuantMetadataBuilder.build() so that
 # do_kv_cache_update can detect pure-decode steps without receiving metadata.
@@ -131,8 +131,8 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["TurboQuantAttentionImpl"]:
-        if _USE_TQ_FUSION_V3_HIP:
-            from vllm.v1.attention.ops.tq_fusion_v3_hip import (
+        if _USE_TQ_SOA_FUSION:
+            from vllm.v1.attention.ops.turboquant_soa_fusion import (
                 FusionTurboQuantAttentionImpl,
             )
 
