@@ -1,19 +1,17 @@
 """Bridge to the SoA/unified TurboQuant kernels.
 
-The local experimental path lives in this repository, but for the first
-bring-up we keep the Python/Triton source of truth in the sibling
-`vllm_tq_rocm_v3_sinks` checkout. This lets the backend adopt the new SoA
-layout + unified attention contract without perturbing the existing
-production path while we iterate on the fused HIP/Triton integration.
+All Python/Triton SoA kernels (store, decode, unified attention) are now
+self-contained within this package. No external checkout is required.
+
+The env override ``VLLM_TQ_SOA_FUSION_SOURCE_ROOT`` is retained for
+development convenience but is no longer the default load path.
 """
 
 from __future__ import annotations
 
 import ctypes
-import importlib.util
 import math
 import os
-import sys
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -23,9 +21,6 @@ import torch
 
 from vllm.platforms import current_platform
 
-_DEFAULT_SOURCE_ROOT = Path(
-    "/shareddata/amd/jiangyon/vllm_tq_rocm_v3_sinks/vllm/v1/attention/ops"
-)
 _WARNED_HIP_V3_SCALAR_KEYS: set[str] = set()
 
 
@@ -36,23 +31,21 @@ def _warn_hip_v3_scalar_once(key: str, message: str) -> None:
     warnings.warn(message, RuntimeWarning, stacklevel=2)
 
 
-def _source_root() -> Path:
-    override = os.environ.get("VLLM_TQ_SOA_FUSION_SOURCE_ROOT")
-    return Path(override) if override else _DEFAULT_SOURCE_ROOT
+def _load_module_from_external(module_name: str, file_name: str) -> ModuleType:
+    """Load a module from an external source root (development override)."""
+    import importlib.util
+    import sys
 
-
-def _load_module(module_name: str, file_name: str) -> ModuleType:
-    source_path = _source_root() / file_name
+    source_root = os.environ.get("VLLM_TQ_SOA_FUSION_SOURCE_ROOT")
+    if not source_root:
+        raise ImportError("VLLM_TQ_SOA_FUSION_SOURCE_ROOT not set")
+    source_path = Path(source_root) / file_name
     if not source_path.exists():
-        raise ImportError(
-            "TurboQuant SoA fusion source file is missing: "
-            f"{source_path}. Set VLLM_TQ_SOA_FUSION_SOURCE_ROOT to a checkout "
-            "that contains the upstream SoA/unified kernels."
-        )
+        raise ImportError(f"External source file missing: {source_path}")
 
     spec = importlib.util.spec_from_file_location(module_name, source_path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load TurboQuant fusion module from {source_path}")
+        raise ImportError(f"Unable to load module from {source_path}")
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -62,26 +55,36 @@ def _load_module(module_name: str, file_name: str) -> ModuleType:
 
 @lru_cache
 def _decode_module() -> ModuleType:
-    return _load_module(
-        "vllm.v1.attention.ops.turboquant_soa_fusion._external_decode",
-        "triton_turboquant_decode.py",
-    )
+    if os.environ.get("VLLM_TQ_SOA_FUSION_SOURCE_ROOT"):
+        return _load_module_from_external(
+            "vllm.v1.attention.ops.turboquant_soa_fusion._external_decode",
+            "triton_turboquant_decode.py",
+        )
+    # Default: use the self-contained copy within this package
+    from . import triton_turboquant_decode as mod
+    return mod
 
 
 @lru_cache
 def _store_module() -> ModuleType:
-    return _load_module(
-        "vllm.v1.attention.ops.turboquant_soa_fusion._external_store",
-        "triton_turboquant_store.py",
-    )
+    if os.environ.get("VLLM_TQ_SOA_FUSION_SOURCE_ROOT"):
+        return _load_module_from_external(
+            "vllm.v1.attention.ops.turboquant_soa_fusion._external_store",
+            "triton_turboquant_store.py",
+        )
+    from . import triton_turboquant_store as mod
+    return mod
 
 
 @lru_cache
 def _unified_module() -> ModuleType:
-    return _load_module(
-        "vllm.v1.attention.ops.turboquant_soa_fusion._external_unified_attention",
-        "triton_turboquant_unified_attention.py",
-    )
+    if os.environ.get("VLLM_TQ_SOA_FUSION_SOURCE_ROOT"):
+        return _load_module_from_external(
+            "vllm.v1.attention.ops.turboquant_soa_fusion._external_unified_attention",
+            "triton_turboquant_unified_attention.py",
+        )
+    from . import triton_turboquant_unified_attention as mod
+    return mod
 
 
 @lru_cache
@@ -543,7 +546,36 @@ def _use_fp8_e4b15(device: int = 0) -> int:
     return _decode_module()._use_fp8_e4b15(device)
 
 
-_tq_full_dequant_kv = _decode_module()._tq_full_dequant_kv
+def _get_tq_full_dequant_kv():
+    """Lazy accessor for _tq_full_dequant_kv to avoid eager module load."""
+    return _decode_module()._tq_full_dequant_kv
+
+
+# Lazy proxy: accessed as _tq_full_dequant_kv but deferred until first use.
+# The underlying object is a Triton JIT kernel invoked via kernel[grid](...),
+# so __getitem__ is the primary dispatch path.
+class _LazyDequantKV:
+    """Proxy that lazily loads _tq_full_dequant_kv on first access."""
+
+    def __init__(self):
+        self._cached = None
+
+    def _resolve(self):
+        if self._cached is None:
+            self._cached = _get_tq_full_dequant_kv()
+        return self._cached
+
+    def __getitem__(self, key):
+        return self._resolve()[key]
+
+    def __getattr__(self, name):
+        return getattr(self._resolve(), name)
+
+    def __call__(self, *args, **kwargs):
+        return self._resolve()(*args, **kwargs)
+
+
+_tq_full_dequant_kv = _LazyDequantKV()
 
 
 def triton_turboquant_store(*args, **kwargs):
