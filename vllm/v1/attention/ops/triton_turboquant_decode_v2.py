@@ -35,6 +35,11 @@ from vllm.v1.attention.ops.triton_turboquant_decode import _use_fp8_e4b15
 # triton_turboquant_decode.py).
 _is_hip = current_platform.is_rocm()
 
+# On ROCm, bf16 has the same MFMA throughput as fp16 but wider dynamic range
+# (8-bit exponent vs 5-bit), which is safer for attention scores.  On CUDA,
+# fp16 tensor cores may be faster than bf16 for some shapes.
+_DOT_DTYPE = tl.bfloat16 if _is_hip else tl.float16
+
 
 # ---------------------------------------------------------------------------
 # Pair LUT construction (FLUTE) — called once at launcher time
@@ -110,6 +115,7 @@ def _tq_decode_stage1_v2(
     NORM_CORRECTION: tl.constexpr = 0,
     FP8_E4B15: tl.constexpr = 0,
     USE_PAIR_LUT: tl.constexpr = 0,
+    USE_BF16_DOT: tl.constexpr = 0,
 ):
     # Grid: (B, Hk, NUM_KV_SPLITS) — one program per KV head group
     bid = tl.program_id(0)
@@ -229,8 +235,11 @@ def _tq_decode_stage1_v2(
                 K_f = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
             # K_f: [TILE_SIZE, BLOCK_D] → transpose for tl.dot
             K_T = tl.trans(K_f)
-            # S: [BLOCK_M, TILE_SIZE]
-            S = QK_SCALE * tl.dot(Q.to(tl.float16), K_T.to(tl.float16))
+            # S: [BLOCK_M, TILE_SIZE]  (bf16 dot on ROCm for better dynamic range)
+            if USE_BF16_DOT:
+                S = QK_SCALE * tl.dot(Q.to(tl.bfloat16), K_T.to(tl.bfloat16))
+            else:
+                S = QK_SCALE * tl.dot(Q.to(tl.float16), K_T.to(tl.float16))
         else:
             # --- MSE dequantization ---
             if MSE_BITS == 4 and USE_PAIR_LUT:
@@ -329,7 +338,10 @@ def _tq_decode_stage1_v2(
             K_T = tl.trans(K_recon)
 
             # S: [BLOCK_M, TILE_SIZE] via tensor core MMA
-            S = QK_SCALE * tl.dot(Q.to(tl.float16), K_T.to(tl.float16))
+            if USE_BF16_DOT:
+                S = QK_SCALE * tl.dot(Q.to(tl.bfloat16), K_T.to(tl.bfloat16))
+            else:
+                S = QK_SCALE * tl.dot(Q.to(tl.float16), K_T.to(tl.float16))
 
         # Mask out-of-range positions
         S = tl.where(kv_mask_1d[None, :], S, float("-inf"))
@@ -397,7 +409,10 @@ def _tq_decode_stage1_v2(
 
         # P·V accumulation via tensor core MMA
         # P: [BLOCK_M, TILE_SIZE], V: [TILE_SIZE, BLOCK_D]
-        acc += tl.dot(P.to(tl.float16), V.to(tl.float16))
+        if USE_BF16_DOT:
+            acc += tl.dot(P.to(tl.bfloat16), V.to(tl.bfloat16))
+        else:
+            acc += tl.dot(P.to(tl.float16), V.to(tl.float16))
 
     # ================================================================
     # EPILOGUE: Store per-Q-head partial results for stage2
@@ -611,6 +626,7 @@ def triton_turboquant_decode_attention_v2(
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
         USE_PAIR_LUT=1 if use_pair_lut else 0,
+        USE_BF16_DOT=1 if _is_hip else 0,
         num_warps=4,
         num_stages=stage1_num_stages,
     )
