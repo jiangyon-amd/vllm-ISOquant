@@ -341,7 +341,16 @@ def _decode_num_splits(
     max_seq_len: int,
     max_num_kv_splits: int,
 ) -> int:
-    max_seq_len_hint = max_seq_len if max_seq_len > 0 else int(seq_lens.max().item())
+    # Prefer the pre-computed max_seq_len (a Python int) to avoid a GPU→CPU
+    # sync via .item().  During CUDAGraph capture the stream is in recording
+    # mode and .item() would raise hipErrorStreamCaptureUnsupported.
+    if max_seq_len > 0:
+        max_seq_len_hint = max_seq_len
+    elif torch.cuda.is_current_stream_capturing():
+        # Fallback: assume long context so we pick the 3-D split path.
+        max_seq_len_hint = 2048
+    else:
+        max_seq_len_hint = int(seq_lens.max().item())
     use_3d = max_seq_len_hint >= 1024 and max_num_kv_splits > 1
     num_splits = max(1, max_num_kv_splits if use_3d else 1)
     max_possible_splits = max(1, math.ceil(max_seq_len_hint / block_size))
